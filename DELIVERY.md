@@ -251,6 +251,8 @@ Invoke-RestMethod http://localhost:3000/api/history?limit=1
 # 期望：{ total, limit, records: [...] }
 ```
 
+> **入口文件说明**：BFF 的启动入口是 `bff/src/index.ts`，它只负责监听端口；应用本体（路由、Java 转发、契约 `meta` 组装、SQLite 持久化）全部定义在 `bff/src/app.ts`（导出 `app`，同时被 vitest 直接引用）。两者刻意分离，保证「可测试的 app」与「可运行的进程」职责单一。`npm run dev` / `npm start` / Dockerfile 均指向 `index.ts`。
+
 #### 步骤 5：启动前端
 
 ```powershell
