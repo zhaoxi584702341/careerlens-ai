@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, shallowRef } from 'vue'
-import * as echarts from 'echarts'
+import * as echarts from 'echarts/core'
+import { RadarChart } from 'echarts/charts'
+import { TooltipComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+import type { ECharts } from 'echarts/core'
 import { fetchRadar, type RadarDimension } from '@/api/radar'
+
+echarts.use([RadarChart, TooltipComponent, CanvasRenderer])
 
 const resumeText = ref('')
 const jdText = ref('')
@@ -13,7 +19,7 @@ const message = ref('')
 const hasResult = ref(false)
 
 const chartRef = ref<HTMLDivElement | null>(null)
-const chartInstance = shallowRef<echarts.ECharts | null>(null)
+const chartInstance = shallowRef<ECharts | null>(null)
 
 const canSubmit = computed(
   () =>
