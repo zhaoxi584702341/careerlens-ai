@@ -10,6 +10,7 @@
 """
 
 import json
+import logging
 import os
 import re
 from typing import Any, Optional
@@ -22,6 +23,13 @@ from pydantic import BaseModel
 
 # 加载 .env（LLM_API_KEY / LLM_BASE_URL / LLM_MODEL）
 load_dotenv()
+
+# 日志配置：统一使用模块级 logger，便于排查 LLM 调用与降级情况
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logger = logging.getLogger("careerlens.python")
 
 # ===== LLM 客户端初始化（与 BFF 共用同一套 LLM 地址配置） =====
 LLM_API_KEY = os.getenv("LLM_API_KEY", "")
