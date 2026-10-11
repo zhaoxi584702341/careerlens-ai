@@ -11,6 +11,25 @@ venv/
 .venv/
 .env
 
+# Java / Maven
+target/
+build/
+
+# Logs
+*.log
+
+# Test / coverage
+coverage/
+.next/
+out/
+
+# SQLite 数据库文件（BFF 数据持久化）
+*.sqlite
+*.db
+bff/data/careerlens.db
+bff/data/careerlens.db-shm
+bff/data/careerlens.db-wal
+
 # Temp
 .tmp/
 out.txt
