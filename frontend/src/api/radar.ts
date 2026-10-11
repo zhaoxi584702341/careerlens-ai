@@ -1,4 +1,5 @@
 import http from './index'
+import type { Meta } from './resume'
 
 // POST /api/radar 请求体
 export interface RadarRequest {
@@ -14,7 +15,9 @@ export interface RadarDimension {
 
 // POST /api/radar 返回体
 export interface RadarResponse {
+  success?: boolean
   dimensions: RadarDimension[]
+  meta?: Meta
   message: string
 }
 

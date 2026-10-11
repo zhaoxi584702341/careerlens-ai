@@ -1,0 +1,126 @@
+name: CI
+
+# 触发条件：推送到 main/develop 分支、面向 main 的 PR、以及手动触发
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的重复触发取消进行中的旧任务，节省 CI 资源
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ==================== Python 服务：代码检查 + 接口测试 ====================
+  python-service:
+    name: Python Service (lint + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: python-service/requirements-dev.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+          pip install ruff
+
+      - name: 代码静态检查（ruff）
+        run: ruff check . --select E,F,W --ignore E501
+
+      - name: 运行接口测试（pytest）
+        # 无 LLM_API_KEY，真实链路冒烟用例通过 skipif 自动跳过，保证离线确定性通过
+        run: pytest -v
+
+  # ==================== BFF：类型检查 + 构建 + 接口测试 ====================
+  bff:
+    name: BFF (type-check + build + vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bff
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: bff/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run type-check
+
+      - name: 构建
+        run: npm run build
+
+      - name: 运行接口测试（vitest）
+        run: npm test
+
+  # ==================== Java 服务：编译 + 接口测试 ====================
+  java-service:
+    name: Java Service (mvn test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: java-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: java-service/pom.xml
+
+      - name: 运行接口测试（MockMvc + MockRestServiceServer）
+        run: mvn -B --no-transfer-progress test
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: java-surefire-reports
+          path: java-service/target/surefire-reports/
+          if-no-files-found: ignore
+
+  # ==================== 前端：类型检查 + 构建 ====================
+  frontend:
+    name: Frontend (type-check + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查与构建
+        run: npm run build

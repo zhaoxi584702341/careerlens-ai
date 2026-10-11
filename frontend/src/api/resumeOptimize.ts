@@ -1,4 +1,5 @@
 import http from './index'
+import type { Meta } from './resume'
 
 // POST /api/optimize-resume 请求体
 export interface OptimizeResumeRequest {
@@ -8,9 +9,11 @@ export interface OptimizeResumeRequest {
 
 // POST /api/optimize-resume 返回体
 export interface OptimizeResumeResponse {
+  success?: boolean
   summary: string
   suggestions: string[]
   missing_keywords: string[]
+  meta?: Meta
   message: string
 }
 

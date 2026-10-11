@@ -1,0 +1,251 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://careerlens.ai/contracts/analysis-response.schema.json",
+  "title": "简历分析响应",
+  "description": "CareerLens AI 全链路分析响应契约。覆盖 resume / qualityIssues / skills / jd / match / meta 全部区块。所有对外分析接口（analyze / match / optimize / radar）的响应必须是本 schema 的（子集）实例。",
+  "type": "object",
+  "required": ["success", "meta"],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "description": "业务是否成功完成（降级仍算成功）"
+    },
+    "resume": {
+      "type": "object",
+      "description": "简历解析结果",
+      "required": ["cleaned"],
+      "properties": {
+        "cleaned": {
+          "type": "object",
+          "required": ["sections", "wordCount", "language"],
+          "properties": {
+            "sections": {
+              "type": "array",
+              "description": "分节识别结果",
+              "items": {
+                "type": "object",
+                "required": ["name", "text"],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "enum": ["basic", "education", "work", "project", "skill", "summary", "other"],
+                    "description": "章节标识"
+                  },
+                  "title": { "type": "string", "description": "原始章节标题" },
+                  "text": { "type": "string" },
+                  "timeline": {
+                    "type": "array",
+                    "description": "该章节抽取到的时间区间",
+                    "items": {
+                      "type": "object",
+                      "required": ["start"],
+                      "properties": {
+                        "start": { "type": "string", "description": "起始时间，如 2021-09" },
+                        "end": { "type": "string", "description": "结束时间；至今则为 present" }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "wordCount": { "type": "integer", "minimum": 0 },
+            "language": { "type": "string", "enum": ["zh", "en", "mixed"] }
+          }
+        }
+      }
+    },
+    "qualityIssues": {
+      "type": "array",
+      "description": "简历结构化问题清单",
+      "items": {
+        "type": "object",
+        "required": ["code", "severity", "message", "location", "suggestion"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "NO_QUANTIFIED_IMPACT",
+              "INSUFFICIENT_DETAIL",
+              "EMPLOYMENT_GAP",
+              "SKILL_LIST_WITHOUT_DEPTH",
+              "TOO_LONG",
+              "TOO_SHORT",
+              "MISSING_SECTION"
+            ]
+          },
+          "severity": { "type": "string", "enum": ["high", "warn", "info"] },
+          "message": { "type": "string", "minLength": 1 },
+          "location": { "type": "string", "description": "问题所在的章节或字段定位" },
+          "suggestion": { "type": "string", "description": "可执行的改进建议" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "skills": {
+      "type": "object",
+      "description": "技能归一化结果",
+      "properties": {
+        "normalized": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["canonical", "raw", "category", "confidence"],
+            "properties": {
+              "canonical": { "type": "string", "description": "标准技能名" },
+              "raw": { "type": "string", "description": "简历 / JD 中的原始表述" },
+              "category": {
+                "type": "string",
+                "enum": ["language", "framework", "database", "devops", "tool", "soft-skill", "other"]
+              },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "unrecognized": {
+          "type": "array",
+          "description": "词典未覆盖、保留原始表述的技能名",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "jd": {
+      "type": "object",
+      "description": "JD 需求解析结果",
+      "properties": {
+        "requirements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["skill", "mandatory"],
+            "properties": {
+              "skill": { "type": "string", "description": "归一化后的技能名" },
+              "level": {
+                "type": "string",
+                "enum": ["熟悉", "熟练", "精通", "了解", "不限"],
+                "description": "要求的熟练度"
+              },
+              "mandatory": { "type": "boolean", "description": "是否为必备技能" },
+              "evidence": { "type": "string", "description": "JD 原文引用" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "description": "匹配打分结果（显式公式，可复现）",
+      "required": ["score", "level"],
+      "properties": {
+        "score": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "level": {
+          "type": "string",
+          "enum": ["EXCELLENT", "GOOD_FIT", "PARTIAL_FIT", "WEAK_FIT"]
+        },
+        "breakdown": {
+          "type": "object",
+          "description": "三项分权重，score = round(100 × (0.6×mandatory + 0.3×optional + 0.1×levelFit))",
+          "required": ["mandatory", "optional", "levelFit"],
+          "properties": {
+            "mandatory": { "type": "number", "minimum": 0, "maximum": 1, "description": "必备技能命中率" },
+            "optional": { "type": "number", "minimum": 0, "maximum": 1, "description": "加分技能命中率（无加分项时 1.0）" },
+            "levelFit": { "type": "number", "minimum": 0, "maximum": 1, "description": "经验年限匹配度归一值" }
+          },
+          "additionalProperties": false
+        },
+        "hits": {
+          "type": "array",
+          "description": "命中项，每项必须附简历原文 evidence 溯源",
+          "items": {
+            "type": "object",
+            "required": ["skill", "hitType", "evidence", "source"],
+            "properties": {
+              "skill": { "type": "string" },
+              "hitType": { "type": "string", "enum": ["EXACT", "SYNONYM", "INFERRED"] },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "evidence": { "type": "string", "description": "简历原文引用（可解释性硬指标）" },
+              "source": { "type": "string", "description": "定位，如 sections.work[0] 或字符区间" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "description": "能力缺口，含建议与学习路径",
+          "items": {
+            "type": "object",
+            "required": ["skill", "importance", "suggestion"],
+            "properties": {
+              "skill": { "type": "string" },
+              "importance": { "type": "string", "enum": ["high", "medium", "low"] },
+              "suggestion": { "type": "string", "description": "针对该缺口的改进建议" },
+              "learningPath": {
+                "type": "array",
+                "description": "学习路径步骤",
+                "items": { "type": "string" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "radar": {
+      "type": "object",
+      "description": "能力雷达结果（radar 接口）",
+      "properties": {
+        "dimensions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "score"],
+            "properties": {
+              "name": { "type": "string" },
+              "score": { "type": "integer", "minimum": 0, "maximum": 100 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "optimize": {
+      "type": "object",
+      "description": "简历优化结果（optimize 接口）",
+      "properties": {
+        "summary": { "type": "string" },
+        "suggestions": { "type": "array", "items": { "type": "string" } },
+        "missing_keywords": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "description": "元信息：耗时与降级标识",
+      "required": ["timings", "degraded", "aiMode"],
+      "properties": {
+        "timings": {
+          "type": "object",
+          "description": "各层耗时（毫秒）",
+          "properties": {
+            "bff": { "type": "integer", "minimum": 0 },
+            "java": { "type": "integer", "minimum": 0 },
+            "python": { "type": "integer", "minimum": 0 },
+            "llm": { "type": "integer", "minimum": 0 },
+            "total": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "degraded": {
+          "type": "boolean",
+          "description": "true 表示结果由规则引擎兜底产出，前端必须展示降级提示条"
+        },
+        "aiMode": {
+          "type": "string",
+          "enum": ["llm", "hybrid", "rule"],
+          "description": "本次实际生效的 AI 模式"
+        }
+      }
+    },
+    "message": { "type": "string", "description": "面向用户的提示信息" }
+  },
+  "additionalProperties": true
+}

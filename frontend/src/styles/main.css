@@ -1,13 +1,99 @@
 @import 'tailwindcss';
 
-* {
+/* =============================================================================
+   CareerLens AI 设计令牌（Design Tokens）
+   -----------------------------------------------------------------------------
+   对齐 Linear / Vercel 现代简约美学：渐变蓝主色、浅灰白背景、纯白卡片 + 大圆角
+   + 柔和阴影。Tailwind v4 通过 @theme 暴露为工具类（如 bg-brand-600）。
+   ============================================================================= */
+@theme {
+  /* 品牌主色：渐变蓝 → 紫（from-blue-600 to-purple-600） */
+  --color-brand-50: #eff6ff;
+  --color-brand-100: #dbeafe;
+  --color-brand-200: #bfdbfe;
+  --color-brand-300: #93c5fd;
+  --color-brand-400: #60a5fa;
+  --color-brand-500: #3b82f6;
+  --color-brand-600: #2563eb;
+  --color-brand-700: #1d4ed8;
+  --color-brand-800: #1e40af;
+  --color-brand-900: #1e3a8a;
+
+  /* 辅助色：渐变紫，用于渐变按钮/强调 */
+  --color-purple-400: #a78bfa;
+  --color-purple-500: #8b5cf6;
+  --color-purple-600: #7c3aed;
+  --color-purple-700: #6d28d9;
+
+  /* 兼容别名：原青绿主操作色（组件/测试复用），统一映射到品牌蓝 */
+  --color-accent-50: #eff6ff;
+  --color-accent-100: #dbeafe;
+  --color-accent-400: #60a5fa;
+  --color-accent-500: #3b82f6;
+  --color-accent-600: #2563eb;
+  --color-accent-700: #1d4ed8;
+
+  /* 中性色：冷灰，文字层次（900 标题 / 600 正文 / 400 辅助） */
+  --color-ink-50: #f8fafc;
+  --color-ink-100: #f1f5f9;
+  --color-ink-200: #e2e8f0;
+  --color-ink-300: #cbd5e1;
+  --color-ink-400: #94a3b8;
+  --color-ink-500: #64748b;
+  --color-ink-600: #475569;
+  --color-ink-700: #334155;
+  --color-ink-800: #1e293b;
+  --color-ink-900: #0f172a;
+
+  /* 深色基底（渐变起点 / 深色装饰块） */
+  --color-night: #1a1a2e;
+  --color-night-700: #0f172a;
+
+  /* 应用背景与侧边栏（保留旧类名以兼容既有引用） */
+  --color-canvas: #f8fafc;
+  --color-sidebar: #1a1a2e;
+  --color-sidebar-hover: #232144;
+  --color-sidebar-active: #2d3f5f;
+  --color-sidebar-muted: #93a2bd;
+
+  /* 语义色 */
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+  --color-danger: #dc2626;
+
+  /* 圆角体系：卡片统一 rounded-2xl */
+  --radius-widget: 1rem;
+  --radius-card: 1rem;
+  --radius-control: 0.75rem;
+
+  /* 阴影体系：卡片 shadow-lg，hover 提升 */
+  --shadow-widget: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.05);
+  --shadow-card: 0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.05);
+  --shadow-card-hover: 0 20px 25px -5px rgba(37, 99, 235, 0.18), 0 8px 10px -6px rgba(37, 99, 235, 0.12);
+
+  /* 字体 */
+  --font-sans: 'Inter', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+}
+
+/* 盒模型统一：仅保留 border-box，交由 Tailwind Preflight 处理 margin 重置。
+   不再全局强制 padding: 0 —— 避免清空原生元素（a/li/td 等）默认内边距，
+   内边距由各组件的工具类精准控制。 */
+*,
+::before,
+::after {
   box-sizing: border-box;
-  margin: 0;
-  padding: 0;
 }
 
 html,
 body,
 #app {
   height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-ink-700);
+  background: var(--color-canvas);
+  letter-spacing: 0.01em;
+  -webkit-font-smoothing: antialiased;
 }

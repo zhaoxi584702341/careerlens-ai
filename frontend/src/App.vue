@@ -1,9 +1,11 @@
 <script setup lang="ts">
-// 应用根组件
+import AppLayout from '@/components/AppLayout.vue'
 </script>
 
 <template>
-  <router-view />
+  <AppLayout>
+    <router-view />
+  </AppLayout>
 </template>
 
 <style scoped></style>

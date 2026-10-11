@@ -1,0 +1,15 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: java-service
+  http:
+    client:
+      connect-timeout: 10000
+      read-timeout: 120000
+
+# Python 服务地址（从环境变量读取，默认 localhost:8000）
+python:
+  service:
+    url: ${PYTHON_SERVICE_URL:http://localhost:8000}

@@ -1,2 +1,2 @@
 // Pinia store 统一出口
-export {}
+export { useResumeStore, type ResumeSource } from './resume'

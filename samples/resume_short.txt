@@ -1,0 +1,80 @@
+求职意向: 软件开发工程师
+年龄：
+学校：桂林航天工业学院
+专业：软件工程
+学历：本科(2017-2021)
+籍贯：
+电话：
+邮箱：
+个人信息
+职业技能
+工作经历
+广州达因网络科技有限公司 全栈开发工程师 2026/04-2026/07
+公司主营旅业、门禁等安防软硬件的开发与运营业务。
+出租屋门禁监控系统
+ 项目概述：该项目是整合人脸门禁与视频监控的出租屋安防平台，
+实现租客实名通行、异常告警，赋能警务数字化治安管理。
+ 相关技术：SpringBoot、MybatisPlus、Vue、Mysql、Redis、
+Mqtt 等。
+ 主要职责：参与后台管理和小程序开发与维护。
+深圳云创兽科技有限公司 全栈开发工程师 2025/04-2026/01
+公司以 AIGC 和 TK 矩阵为核心，为跨境电商、短剧出海等场景提供“AI+
+出海一站式解决方案”的科技公司
+云创兽 AIGC 系统
+ 项目概述：该项目是通过调用人工智能大模型生成图片和视频，系
+统还包含视频翻译、海外短视频矩阵、Ai 工具等功能。
+ 相关技术：SpringBoot、MybatisPlus、SpringCloud、Vue、Mysql、
+Redis、RockMq、Jenkins 等。
+ 主要职责：参与系统的视频翻译和 Ai 工具开发与维护。
+桂林天算网络科技有限公 Java 开发工程师 2022/06-2024/07
+公司依托桂林航天工业学院为背景，主营软件应用系统开发业务。
+排筏检验审批系统
+ 项目概述：项目是为桂林海事局定制的排筏检验审批系统，用于审
+批桂林各个景区里排筏的检验结果，系统可以根据模板生成证书。
+ 项目相关技术：SpringBoot、MybatisPlus、SpringCloud、Mysql、
+Redis、RabbitMq、Jenkins 等。
+ 主要职责：参与排筏检验审批系统的设计、开发与维护。
+上海巧房信息科技有限公司 Java 开发工程师 2021/01-2022/05
+公司为 58 集团子公司，主打房产中介 SaaS 管理系统研发，为全国房
+产经纪门店提供房源、客户、交易一体化数字化解决方案。
+项目相关技术：SpringBoot、TkMybatis、SpringCloud、SqlServer、
+Redis、RabbitMq、ElasticSearch 等。
+房源图片治理
+ 项目概述：该项目主要功能是将房源的存量图片和增量图片都送到
+58 集团图片审核中台去检测图片是否符合安居客房源标准。
+ 主要职责：该项目中我主要负责存量图片异步送审和接收所有图片
+审核结果的开发工作，单表数据量 300 万条，累计送审 1000 万张
+存量图片。
+房源图片治理
+ 项目概述：该项目主要功能是巧房的客户可用通过巧房 V20SaaS
+系统预约安居拍房 APP 上的摄影师去拍摄房源的图片、视频、全
+景等资源。
+ 主要职责：在该项目中我主要负责和实勘中台对接接口、处理同步
+预约订单状态，通过工厂模式创建订单、观察者模式获取资源等。
+ 业务需求
+ 思维脑图
+ UML
+ 开发框架
+ Spring
+ SpringMVC
+ Mybatis/MP
+ SpringBoot
+ SpringCloud
+ Vue
+ 数据库中间件
+ Mysql
+ SqlServer
+ Redis
+ RabbitMq
+ RockMq
+ 工具
+ Git
+ Jenkins
+ Xshell/Xftp
+57ffaa900544d96d1HN509q6FlZRy4i8UviYWOKllvXRNxhj2A~~
+57ffaa900544d96d1HN509q6FlZRy4i8UviYWOKllvXRNxhj2A~~
+57ffaa900544d96d1HN509q6FlZRy4i8UviYWOKllvXRNxhj2A~~
+57ffaa900544d96d1HN509q6FlZRy4i8UviYWOKllvXRNxhj2A~~
+57ffaa900544d96d1HN509q6FlZRy4i8UviYWOKllvXRNxhj2A~~
+57ffaa900544d96d1HN509q6FlZRy4i8UviYWOKllvXRNxhj2A~~
+57ffaa900544d96d1HN509q6FlZRy4i8UviYWOKllvXRNxhj2A~~

@@ -1,0 +1,462 @@
+openapi: 3.0.3
+info:
+  title: CareerLens AI API
+  version: 0.1.0
+  description: |
+    CareerLens AI 四层链路对外契约（Vue 前端 → BFF(Node) → Java(job-service) → Python(ai-service) → LLM）。
+
+    本文件以 **BFF 对外接口** 作为主要契约面（前端唯一交互入口），同时记录 Java / Python 内部转发接口，
+    便于契约测试逐层校验。响应结构以 `contracts/analysis-response.schema.json` 为准，
+    错误结构以 `contracts/error-envelope.schema.json` 为准。
+
+servers:
+  - url: http://localhost:3000
+    description: BFF（前端直连）
+  - url: http://localhost:8080
+    description: Java job-service（内部）
+  - url: http://localhost:8000
+    description: Python ai-service（内部）
+
+paths:
+  # ===================== BFF 对外接口 =====================
+  /api/analyze-resume:
+    post:
+      tags: [BFF]
+      summary: 简历解析（BFF → Java /api/analyze → Python /api/analyze）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume_text]
+              properties:
+                resume_text:
+                  type: string
+                  minLength: 1
+                  maxLength: 20000
+      responses:
+        '200':
+          description: 解析成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyzeResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/match-job:
+    post:
+      tags: [BFF]
+      summary: 岗位匹配（BFF → Java /api/match → Python /api/match）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume_text, job_description]
+              properties:
+                resume_text: { type: string, minLength: 1, maxLength: 20000 }
+                job_description: { type: string, minLength: 1, maxLength: 20000 }
+      responses:
+        '200':
+          description: 匹配成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/optimize-resume:
+    post:
+      tags: [BFF]
+      summary: 简历优化（BFF → Java /api/optimize → Python /api/optimize）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume_text, job_description]
+              properties:
+                resume_text: { type: string, minLength: 1, maxLength: 20000 }
+                job_description: { type: string, minLength: 1, maxLength: 20000 }
+      responses:
+        '200':
+          description: 优化建议生成成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptimizeResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/radar:
+    post:
+      tags: [BFF]
+      summary: 能力雷达（BFF → Java /api/radar → Python /api/radar）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume, jd]
+              properties:
+                resume: { type: string, minLength: 1, maxLength: 20000 }
+                jd: { type: string, minLength: 1, maxLength: 20000 }
+      responses:
+        '200':
+          description: 雷达数据生成成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadarResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/history:
+    get:
+      tags: [BFF]
+      summary: 历史记录查询（SQLite 持久化）
+      security: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, default: 20 }
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoryResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  # ===================== Java 内部接口 =====================
+  /api/analyze:
+    post:
+      tags: [Java]
+      summary: Java 转发 Python 简历解析（字段驼峰 resumeText）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resumeText]
+              properties:
+                resumeText: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: 转发成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyzeResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/match:
+    post:
+      tags: [Java]
+      summary: Java 转发 Python 岗位匹配（字段驼峰 resumeText / jobDescription）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resumeText, jobDescription]
+              properties:
+                resumeText: { type: string, minLength: 1 }
+                jobDescription: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: 转发成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/optimize:
+    post:
+      tags: [Java]
+      summary: Java 转发 Python 简历优化
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resumeText, jobDescription]
+              properties:
+                resumeText: { type: string, minLength: 1 }
+                jobDescription: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: 转发成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptimizeResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  /api/radar:
+    post:
+      tags: [Java]
+      summary: Java 转发 Python 能力雷达（字段 resume / jd）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume, jd]
+              properties:
+                resume: { type: string, minLength: 1 }
+                jd: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: 转发成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadarResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+
+  # ===================== Python 接口 =====================
+  /health:
+    get:
+      tags: [Python]
+      summary: Python 健康检查
+      responses:
+        '200':
+          description: 服务健康
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, service, llm_enabled]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  service: { type: string, example: careerlens-ai-python }
+                  llm_enabled: { type: boolean, description: LLM 客户端是否可用 }
+
+  /api/analyze:
+    post:
+      tags: [Python]
+      summary: Python 简历解析（字段蛇形 resume_text，兼容 resumeText）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                resume_text: { type: string }
+                resumeText: { type: string }
+      responses:
+        '200':
+          description: 解析成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyzeResponse'
+
+  /api/match:
+    post:
+      tags: [Python]
+      summary: Python 岗位匹配
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume_text, job_description]
+              properties:
+                resume_text: { type: string }
+                job_description: { type: string }
+      responses:
+        '200':
+          description: 匹配成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MatchResponse'
+
+  /api/optimize:
+    post:
+      tags: [Python]
+      summary: Python 简历优化
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume_text, job_description]
+              properties:
+                resume_text: { type: string }
+                job_description: { type: string }
+      responses:
+        '200':
+          description: 优化成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OptimizeResponse'
+
+  /api/radar:
+    post:
+      tags: [Python]
+      summary: Python 能力雷达
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resume, jd]
+              properties:
+                resume: { type: string }
+                jd: { type: string }
+      responses:
+        '200':
+          description: 雷达生成成功（含降级）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RadarResponse'
+
+components:
+  responses:
+    ServerError:
+      description: |
+        服务端错误。注意：LLM 失败不返回此错误，而是 HTTP 200 + 降级（见 error-codes.md 第 3 节）。
+      content:
+        application/json:
+          schema:
+            $ref: './error-envelope.schema.json'
+
+  schemas:
+    AnalyzeResponse:
+      type: object
+      required: [keywords, score]
+      properties:
+        keywords:
+          type: array
+          items: { type: string }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        cleaned_text: { type: string }
+        message: { type: string }
+
+    MatchResponse:
+      type: object
+      required: [match_score]
+      properties:
+        match_score: { type: integer, minimum: 0, maximum: 100 }
+        level:
+          type: string
+          enum: [EXCELLENT, GOOD_FIT, PARTIAL_FIT, WEAK_FIT]
+        advantages: { type: array, items: { type: string } }
+        improvements: { type: array, items: { type: string } }
+        matched_skills: { type: array, items: { type: string } }
+        missing_skills: { type: array, items: { type: string } }
+        breakdown:
+          type: object
+          properties:
+            mandatory: { type: number }
+            optional: { type: number }
+            levelFit: { type: number }
+        hits:
+          type: array
+          items:
+            type: object
+            properties:
+              skill: { type: string }
+              hitType: { type: string, enum: [EXACT, SYNONYM, INFERRED] }
+              evidence: { type: string }
+              source: { type: string }
+        gaps:
+          type: array
+          items:
+            type: object
+            properties:
+              skill: { type: string }
+              importance: { type: string, enum: [high, medium, low] }
+              suggestion: { type: string }
+              learningPath: { type: array, items: { type: string } }
+        meta:
+          $ref: '#/components/schemas/Meta'
+        message: { type: string }
+
+    OptimizeResponse:
+      type: object
+      properties:
+        summary: { type: string }
+        suggestions: { type: array, items: { type: string } }
+        missing_keywords: { type: array, items: { type: string } }
+        meta:
+          $ref: '#/components/schemas/Meta'
+        message: { type: string }
+
+    RadarResponse:
+      type: object
+      properties:
+        dimensions:
+          type: array
+          items:
+            type: object
+            required: [name, score]
+            properties:
+              name: { type: string }
+              score: { type: integer, minimum: 0, maximum: 100 }
+        meta:
+          $ref: '#/components/schemas/Meta'
+        message: { type: string }
+
+    HistoryResponse:
+      type: object
+      required: [total, limit, records]
+      properties:
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        records:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+              type: { type: string, enum: [analysis, match, optimization, radar] }
+              payload: { type: string, description: JSON 字符串" }
+              createdAt: { type: string, format: date-time }
+        message: { type: string }
+
+    Meta:
+      type: object
+      required: [timings, degraded, aiMode]
+      properties:
+        timings:
+          type: object
+          properties:
+            bff: { type: integer }
+            java: { type: integer }
+            python: { type: integer }
+            llm: { type: integer }
+            total: { type: integer }
+        degraded: { type: boolean }
+        aiMode: { type: string, enum: [llm, hybrid, rule] }
