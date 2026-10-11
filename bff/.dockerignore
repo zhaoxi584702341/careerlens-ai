@@ -1,0 +1,26 @@
+# ==================== bff/.dockerignore ====================
+# 依赖与编译产物（容器内重新安装/编译）
+node_modules/
+dist/
+
+# 环境变量：含敏感配置，禁止进入镜像
+.env
+.env.*
+!.env.example
+*.local
+
+# SQLite 数据文件
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# 版本控制与编辑器
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# 日志
+*.log

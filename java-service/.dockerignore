@@ -1,0 +1,18 @@
+# ==================== java-service/.dockerignore ====================
+# 构建产物（多阶段构建内部重新生成）
+target/
+
+# 环境变量
+.env
+.env.*
+!.env.example
+
+# 版本控制与编辑器
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# 日志
+*.log

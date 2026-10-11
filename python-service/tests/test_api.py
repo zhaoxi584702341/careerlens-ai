@@ -77,12 +77,14 @@ def fake_llm(monkeypatch: pytest.MonkeyPatch):
 # ==================== /health ====================
 
 def test_health(client: TestClient) -> None:
-    """健康检查接口返回 ok。"""
+    """健康检查接口返回 ok，并暴露 llm_enabled 布尔标记。"""
     resp = client.get("/health")
     assert resp.status_code == 200
     body = resp.json()
     assert body["status"] == "ok"
     assert body["service"] == "careerlens-ai-python"
+    # llm_enabled 为布尔标记：是否已初始化 LLM 客户端（与 main.py 契约一致）
+    assert body["llm_enabled"] in (True, False)
 
 
 # ==================== /api/analyze ====================
@@ -111,20 +113,28 @@ def test_analyze_empty_text(client: TestClient) -> None:
 
 
 def test_analyze_missing_field(client: TestClient) -> None:
-    """异常场景：缺少必填字段，FastAPI 返回 422 校验错误。"""
+    """异常场景：缺少必填字段时，main.py 以空文本处理并返回 200 + 参数错误提示。
+
+    说明：main.py 的 AnalyzeRequest 对 resume_text 做了容错（缺失时按空串处理），
+    因此不会触发 FastAPI 的 422 校验错误，而是走「不能为空」的友好分支。
+    """
     resp = client.post("/api/analyze", json={})
-    assert resp.status_code == 422
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["keywords"] == []
+    assert body["score"] == 0
+    assert "不能为空" in body["message"]
 
 
 def test_analyze_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 调用失败应返回 500 与友好提示，并携带本地字典兜底关键词。"""
+    """异常场景：LLM 调用失败时降级——返回 200 + 友好提示，并携带本地字典兜底关键词。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("upstream timeout")
 
     monkeypatch.setattr(main, "call_llm_json", _boom)
     resp = client.post("/api/analyze", json={"resume_text": "熟悉 Java、MySQL"})
-    assert resp.status_code == 500
+    assert resp.status_code == 200
     body = resp.json()
     assert "LLM 调用失败" in body["message"]
     # 本地字典兜底应命中 Java / MySQL
@@ -168,7 +178,7 @@ def test_match_missing_jd(client: TestClient) -> None:
 
 
 def test_match_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 失败返回 500，并携带规则层计算的技能差异兜底。"""
+    """异常场景：LLM 失败降级——返回 200 + 友好提示，并携带规则层计算的技能差异兜底。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("boom")
@@ -178,7 +188,7 @@ def test_match_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
         "/api/match",
         json={"resume_text": "熟悉Vue3", "job_description": "要求Vue3和React"},
     )
-    assert resp.status_code == 500
+    assert resp.status_code == 200
     body = resp.json()
     assert "LLM 调用失败" in body["message"]
 
@@ -210,14 +220,14 @@ def test_optimize_empty_resume(client: TestClient) -> None:
 
 
 def test_optimize_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 失败返回 500。"""
+    """异常场景：LLM 失败降级——返回 200 + 友好提示。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("boom")
 
     monkeypatch.setattr(main, "call_llm_json", _boom)
     resp = client.post("/api/optimize", json={"resume_text": "简历", "job_description": "岗位"})
-    assert resp.status_code == 500
+    assert resp.status_code == 200
     assert "LLM 调用失败" in resp.json()["message"]
 
 
@@ -245,14 +255,14 @@ def test_radar_empty_resume(client: TestClient) -> None:
 
 
 def test_radar_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 失败返回 500。"""
+    """异常场景：LLM 失败降级——返回 200 + 友好提示。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("boom")
 
     monkeypatch.setattr(main, "call_llm_json", _boom)
     resp = client.post("/api/radar", json={"resume": "简历", "jd": "岗位"})
-    assert resp.status_code == 500
+    assert resp.status_code == 200
     assert "LLM 调用失败" in resp.json()["message"]
 
 

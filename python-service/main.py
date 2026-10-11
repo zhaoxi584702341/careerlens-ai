@@ -191,7 +191,7 @@ LLM_ERROR_MESSAGE = "LLM 调用失败，请检查 Python 服务 .env 中的 API 
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health() -> dict[str, Any]:
     return {"status": "ok", "service": "careerlens-ai-python", "llm_enabled": llm_enabled}
 
 

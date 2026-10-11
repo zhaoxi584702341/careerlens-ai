@@ -1,0 +1,34 @@
+# ==================== .dockerignore（根目录，可选） ====================
+# 敏感与环境文件
+.env
+.env.*
+!.env.example
+*.local
+
+# 依赖与产物
+node_modules
+dist
+dist-ssr
+build
+target
+__pycache__
+*.py[cod]
+.venv
+venv
+
+# 数据与日志
+bff/data
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# 版本控制与编辑器
+.git
+.gitignore
+.vscode
+.idea
+.DS_Store
+
+# 文档
+README.md

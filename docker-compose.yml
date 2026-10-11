@@ -1,0 +1,133 @@
+# CareerLens-AI 生产级容器编排
+# 链路：frontend(Nginx) → bff(Node/Express) → java-service(Spring Boot) → python-service(FastAPI) → LLM
+# 容器间通过服务名通信，仅前端对外暴露端口，其余服务端口仅用于本机调试
+name: careerlens-ai
+
+services:
+  # ==================== Python AI 能力服务（链路最底层） ====================
+  python-service:
+    build:
+      context: ./python-service
+    image: careerlens/python-service:latest
+    container_name: careerlens-python
+    # 仅映射到宿主机，便于本机 curl 调试；生产可注释掉
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./python-service/.env
+    environment:
+      - PYTHON_ENV=production
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status == 200 else sys.exit(1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - careerlens-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==================== Java 编排服务（转发 Python） ====================
+  java-service:
+    build:
+      context: ./java-service
+    image: careerlens/java-service:latest
+    container_name: careerlens-java
+    ports:
+      - "8080:8080"
+    environment:
+      - PYTHON_SERVICE_URL=http://python-service:8000
+      - SPRING_PROFILES_ACTIVE=production
+    depends_on:
+      python-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+    networks:
+      - careerlens-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==================== BFF 接入层（转发 Java） ====================
+  bff:
+    build:
+      context: ./bff
+    image: careerlens/bff:latest
+    container_name: careerlens-bff
+    ports:
+      - "3000:3000"
+    environment:
+      - JAVA_SERVICE_URL=http://java-service:8080
+      - NODE_ENV=production
+      - PORT=3000
+      # SQLite 数据文件写入挂载卷，容器重启数据不丢失
+      - DB_PATH=/app/data/careerlens.db
+    volumes:
+      - bff-data:/app/data
+    depends_on:
+      java-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/api/history?limit=1').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    networks:
+      - careerlens-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ==================== 前端静态资源（Nginx 托管 + API 反代） ====================
+  frontend:
+    build:
+      context: ./frontend
+    image: careerlens/frontend:latest
+    container_name: careerlens-frontend
+    # 宿主机 5173 → 容器 Nginx 80，保持与开发环境一致的访问端口
+    ports:
+      - "5173:80"
+    depends_on:
+      bff:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - careerlens-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ==================== 自定义网络：容器间通过服务名解析 ====================
+networks:
+  careerlens-net:
+    driver: bridge
+
+# ==================== 数据卷：持久化 SQLite 数据库 ====================
+volumes:
+  bff-data:
+    driver: local
