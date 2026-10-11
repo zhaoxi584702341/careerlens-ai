@@ -90,16 +90,23 @@ def test_health(client: TestClient) -> None:
 # ==================== /api/analyze ====================
 
 def test_analyze_normal(client: TestClient, fake_llm) -> None:
-    """正常场景：返回 LLM 语义抽取的关键词与评分，cleaned_text 正确回显。"""
+    """正常场景：返回 LLM 语义抽取的关键词与评分，并携带规则层结构化字段与 meta。"""
     payload = {"resume_text": "负责公司官网前端页面开发，主导性能调优"}
     resp = client.post("/api/analyze", json=payload)
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is True
     assert "前端开发" in body["keywords"]
     assert body["score"] == 72
-    # cleaned_text 应回显输入（清洗后）
-    assert body["cleaned_text"] == payload["resume_text"]
-    assert "message" in body
+    # cleaned_text 为规则层清洗结果（含全角转半角），因此用清洗后的文本比对
+    assert body["cleaned_text"] == main.rules_normalize_text(payload["resume_text"])
+    # 契约扩展字段：分节 / 质量问题 / 技能归一化 / meta
+    assert "sections" in body["resume"]["cleaned"]
+    assert isinstance(body["qualityIssues"], list)
+    assert isinstance(body["skills"]["normalized"], list)
+    assert body["meta"]["degraded"] is False
+    assert body["meta"]["aiMode"] == "hybrid"
+    assert body["meta"]["timings"]["python"] >= 0
 
 
 def test_analyze_empty_text(client: TestClient) -> None:
@@ -107,6 +114,7 @@ def test_analyze_empty_text(client: TestClient) -> None:
     resp = client.post("/api/analyze", json={"resume_text": "   "})
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is False
     assert body["keywords"] == []
     assert body["score"] == 0
     assert "不能为空" in body["message"]
@@ -121,13 +129,14 @@ def test_analyze_missing_field(client: TestClient) -> None:
     resp = client.post("/api/analyze", json={})
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is False
     assert body["keywords"] == []
     assert body["score"] == 0
     assert "不能为空" in body["message"]
 
 
 def test_analyze_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 调用失败时降级——返回 200 + 友好提示，并携带本地字典兜底关键词。"""
+    """异常场景：LLM 调用失败时降级——返回 200 + 规则层结果，meta 标记 degraded/aiMode=rule。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("upstream timeout")
@@ -136,16 +145,31 @@ def test_analyze_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch
     resp = client.post("/api/analyze", json={"resume_text": "熟悉 Java、MySQL"})
     assert resp.status_code == 200
     body = resp.json()
-    assert "LLM 调用失败" in body["message"]
     # 本地字典兜底应命中 Java / MySQL
     assert "Java" in body["keywords"]
     assert "MySQL" in body["keywords"]
+    assert body["meta"]["degraded"] is True
+    assert body["meta"]["aiMode"] == "rule"
+    # 规则层仍应产出结构化质量问题
+    assert isinstance(body["qualityIssues"], list)
+
+
+def test_analyze_rule_mode_produces_contract_fields(client: TestClient) -> None:
+    """契约场景：规则层独立产出 hits/gaps 级别的结构化解析（不依赖 LLM）。"""
+    resp = client.post(
+        "/api/analyze",
+        json={"resume_text": "教育背景：本科\n技能：熟悉Vue3、TypeScript\n工作经历：2020.01-2023.06 负责前端页面开发，性能优化提升30%"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["skills"]["normalized"], "规则层应抽取到归一化技能"
+    assert body["resume"]["cleaned"]["language"] in {"zh", "en", "mixed"}
 
 
 # ==================== /api/match ====================
 
 def test_match_normal(client: TestClient, fake_llm) -> None:
-    """正常场景：返回匹配度、优势、改进项与技能差异。"""
+    """正常场景：返回匹配度、等级、命中项、能力缺口与 meta。"""
     payload = {
         "resume_text": "3年前端开发，熟悉Vue3、TypeScript",
         "job_description": "要求React、性能优化",
@@ -153,10 +177,13 @@ def test_match_normal(client: TestClient, fake_llm) -> None:
     resp = client.post("/api/match", json=payload)
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is True
     assert body["match_score"] == 65
+    assert body["level"] in {"EXCELLENT", "GOOD_FIT", "PARTIAL_FIT", "WEAK_FIT"}
     assert isinstance(body["advantages"], list) and body["advantages"]
     assert isinstance(body["improvements"], list)
-    assert body["message"] == "匹配完成"
+    assert body["meta"]["aiMode"] == "hybrid"
+    assert "breakdown" in body
 
 
 def test_match_missing_resume(client: TestClient) -> None:
@@ -164,6 +191,7 @@ def test_match_missing_resume(client: TestClient) -> None:
     resp = client.post("/api/match", json={"resume_text": "", "job_description": "要求React"})
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is False
     assert body["match_score"] == 0
     assert "resume_text" in body["message"]
 
@@ -173,12 +201,13 @@ def test_match_missing_jd(client: TestClient) -> None:
     resp = client.post("/api/match", json={"resume_text": "3年前端", "job_description": ""})
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is False
     assert body["match_score"] == 0
     assert "job_description" in body["message"]
 
 
 def test_match_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 失败降级——返回 200 + 友好提示，并携带规则层计算的技能差异兜底。"""
+    """异常场景：LLM 失败降级——返回 200 + 规则层可解释结果（hits/gaps）。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("boom")
@@ -190,7 +219,23 @@ def test_match_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) 
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert "LLM 调用失败" in body["message"]
+    assert body["meta"]["degraded"] is True
+    assert body["meta"]["aiMode"] == "rule"
+    # 规则层应精确命中 Vue（EXACT/SYNONYM），并给出 React 缺口与学习路径
+    assert any(h["skill"] == "Vue" for h in body["hits"])
+    assert any(g["skill"] == "React" for g in body["gaps"])
+    assert body["gaps"][0]["learningPath"], "能力缺口应带学习路径"
+    assert body["level"] in {"EXCELLENT", "GOOD_FIT", "PARTIAL_FIT", "WEAK_FIT"}
+
+
+def test_match_accepts_camel_case_fields(client: TestClient, fake_llm) -> None:
+    """契约场景：Java 转发层使用驼峰 resumeText/jobDescription，应被正确解析。"""
+    resp = client.post(
+        "/api/match",
+        json={"resumeText": "3年前端开发，熟悉Vue3", "jobDescription": "要求React"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["match_score"] == 65
 
 
 # ==================== /api/optimize ====================
@@ -204,10 +249,11 @@ def test_optimize_normal(client: TestClient, fake_llm) -> None:
     resp = client.post("/api/optimize", json=payload)
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is True
     assert body["summary"]
     assert isinstance(body["suggestions"], list) and len(body["suggestions"]) >= 1
     assert isinstance(body["missing_keywords"], list)
-    assert body["message"] == "优化建议已生成"
+    assert body["meta"]["aiMode"] == "hybrid"
 
 
 def test_optimize_empty_resume(client: TestClient) -> None:
@@ -215,34 +261,43 @@ def test_optimize_empty_resume(client: TestClient) -> None:
     resp = client.post("/api/optimize", json={"resume_text": "", "job_description": "要求React"})
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is False
     assert body["summary"] == ""
     assert "不能为空" in body["message"]
 
 
 def test_optimize_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 失败降级——返回 200 + 友好提示。"""
+    """异常场景：LLM 失败降级——返回 200 + 规则层缺失关键词兜底，meta 标记 degraded。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("boom")
 
     monkeypatch.setattr(main, "call_llm_json", _boom)
-    resp = client.post("/api/optimize", json={"resume_text": "简历", "job_description": "岗位"})
+    resp = client.post(
+        "/api/optimize",
+        json={"resume_text": "熟悉Vue3", "job_description": "要求React、性能优化"},
+    )
     assert resp.status_code == 200
-    assert "LLM 调用失败" in resp.json()["message"]
+    body = resp.json()
+    assert body["meta"]["degraded"] is True
+    assert body["meta"]["aiMode"] == "rule"
+    # 规则层应给出 React 缺口关键词
+    assert "React" in body["missing_keywords"]
 
 
 # ==================== /api/radar ====================
 
 def test_radar_normal(client: TestClient, fake_llm) -> None:
-    """正常场景：返回五个维度的能力评分。"""
+    """正常场景：返回五个维度的能力评分与 meta。"""
     payload = {"resume": "3年前端开发", "jd": "要求React"}
     resp = client.post("/api/radar", json=payload)
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is True
     assert len(body["dimensions"]) == 5
     for dim in body["dimensions"]:
         assert 0 <= dim["score"] <= 100
-    assert body["message"] == "雷达图数据已生成"
+    assert body["meta"]["aiMode"] == "hybrid"
 
 
 def test_radar_empty_resume(client: TestClient) -> None:
@@ -250,20 +305,27 @@ def test_radar_empty_resume(client: TestClient) -> None:
     resp = client.post("/api/radar", json={"resume": "", "jd": "要求React"})
     assert resp.status_code == 200
     body = resp.json()
+    assert body["success"] is False
     assert body["dimensions"] == []
     assert "resume" in body["message"]
 
 
 def test_radar_llm_failure(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """异常场景：LLM 失败降级——返回 200 + 友好提示。"""
+    """异常场景：LLM 失败降级——返回 200 + 规则层推导的五维度雷达（非空）。"""
 
     def _boom(system_prompt: str, user_prompt: str):  # noqa: ANN202
         raise RuntimeError("boom")
 
     monkeypatch.setattr(main, "call_llm_json", _boom)
-    resp = client.post("/api/radar", json={"resume": "简历", "jd": "岗位"})
+    resp = client.post("/api/radar", json={"resume": "熟悉Vue3，3年开发", "jd": "要求Vue3和React"})
     assert resp.status_code == 200
-    assert "LLM 调用失败" in resp.json()["message"]
+    body = resp.json()
+    assert body["meta"]["degraded"] is True
+    assert body["meta"]["aiMode"] == "rule"
+    # 降级后仍应产出可绘制的五维度数据，而非空结构
+    assert len(body["dimensions"]) == 5
+    for dim in body["dimensions"]:
+        assert 0 <= dim["score"] <= 100
 
 
 # ==================== 工具函数单元测试 ====================

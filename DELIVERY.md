@@ -30,15 +30,16 @@ CareerLens AI 是一个 AI 招聘 / 职业匹配系统，提供四项核心能�
 | # | 验证项 | 命令 | 实测结果 |
 | --- | --- | --- | --- |
 | 1 | BFF 类型检查 | `npm run type-check`（bff/） | ✅ 通过（exit 0） |
-| 2 | BFF 单元/接口测试 | `npm test`（bff/） | ✅ **18 passed**（1 file） |
-| 3 | Python 接口测试 | `.\.venv\Scripts\python.exe -m pytest`（python-service/） | ✅ **19 passed** |
+| 2 | BFF 单元/接口测试 | `npm test`（bff/） | ✅ **19 passed**（1 file） |
+| 3 | Python 接口测试 | `.\.venv\Scripts\python.exe -m pytest`（python-service/） | ✅ **21 passed** |
 | 4 | Java 测试 | `mvn -B test`（java-service/） | ✅ **10 passed**，BUILD SUCCESS |
 | 5 | 前端测试 | `npm test`（frontend/） | ✅ **30 passed**（3 files） |
 | 6 | 前端构建 | `npm run build`（frontend/） | ✅ 成功（约 8.2s） |
-| 7 | Compose 配置校验 | `docker compose config` | ✅ 通过，四服务渲染正常 |
-| 8 | Compose 完整构建启动 | `docker compose up -d --build` | ❌ **失败**：Docker Hub 网络不可达（环境限制，非配置缺陷，详见 4.1-1） |
+| 7 | 契约校验 | `.\.venv\Scripts\python.exe ..\scripts\validate-contracts.py` | ✅ **PASS=19 FAIL=0** |
+| 8 | Compose 配置校验 | `docker compose config` | ✅ 通过，四服务渲染正常 |
+| 9 | Compose 完整构建启动 | `docker compose up -d --build` | ❌ **失败**：Docker Hub 网络不可达（环境限制，非配置缺陷，详见 4.1-1） |
 
-**结论**：四项测试套件 + 前端构建 + Compose 配置全部实跑通过；唯一的 Compose 完整启动因当前环境无法访问 Docker Hub 而未能完成，已在第 4 节如实披露。
+**结论**：四项测试套件 + 前端构建 + 契约校验 + Compose 配置全部实跑通过；唯一的 Compose 完整启动因当前环境无法访问 Docker Hub 而未能完成，已在第 4 节如实披露。
 
 ---
 
@@ -101,7 +102,7 @@ LLM（外部大模型服务）
 - **备选方案**：
   - A. 沿用常规做法返回 `500`，由前端提示错误；
   - B. 返回 `200` + 本地降级结果（技能字典 / 集合交并差 / 空结构）。
-- **最终决策**：选 B（仅限 Python 业务四接口）。**依据**：`analyze` 降级为本地字典 `extract_skills()`（score=0）、`match` 降级为技能集合交并差、`optimize`/`radar` 降级为可控空结构。**代价**：调用方无法仅凭状态码判断是否走了真实 LLM，需结合响应内容与 `/health` 的 `llm_enabled` 字段。**注意**：Java 层下游失败仍返回 `500`（契约不同，见 4.1-3）。
+- **最终决策**：选 B（仅限 Python 业务四接口）。**依据**：`analyze` 降级为本地字典 `extract_skills()`（score=0）、`match` 降级为技能集合交并差、`optimize`/`radar` 降级为可控空结构；**且响应体 `meta.degraded=true`、`meta.aiMode=rule` 显式标记降级**，调用方可据此判断是否走了真实 LLM。**注意**：Java 层下游失败仍返回 `500`（契约不同，见 4.1-3）。
 
 #### 决策 6：RestTemplate 字符集采用「覆盖索引 1」而非「追加转换器」
 
@@ -152,12 +153,12 @@ LLM_MODEL=gpt-5.6-sol
 ### 4.2 自动化测试验证（四端离线可运行）— 已实测
 
 ```powershell
-# Python（19 passed）
+# Python（21 passed）
 cd python-service
 .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -v
 
-# BFF（type-check 通过 + 18 passed）
+# BFF（type-check 通过 + 19 passed）
 cd ..\bff
 npm ci
 npm run type-check
@@ -172,14 +173,18 @@ cd ..\frontend
 npm ci
 npm test
 npm run build
+
+# 契约校验（PASS=19 FAIL=0）
+cd ..\python-service
+.\.venv\Scripts\python.exe ..\scripts\validate-contracts.py
 ```
 
 **各测试套件覆盖情况**：
 
 | 端 | 测试文件 | 用例数 | 覆盖内容 |
 | --- | --- | --- | --- |
-| Python | `python-service/tests/test_api.py` | 19 | 4 接口正常/降级、工具函数单测、真实 LLM 冒烟（条件跳过） |
-| BFF | `bff/tests/api.test.ts` | 18 | 4 业务接口 + history 的正常/参数校验/下游失败/分数裁剪/持久化 |
+| Python | `python-service/tests/test_api.py` | 21 | 4 接口正常/降级、契约字段（meta/level/hits/gaps/qualityIssues/skills）、驼峰字段兼容、工具函数单测、真实 LLM 冒烟（条件跳过） |
+| BFF | `bff/tests/api.test.ts` | 19 | 4 业务接口 + history 的正常/参数校验/下游失败/分数裁剪/持久化、契约字段透传与 meta 补齐 |
 | Java | `java-service/src/test/java/.../CareerControllerTest.java` | 10 | 4 接口 + health、字段映射断言、下游失败 500、空请求体边界 |
 | 前端 | `frontend/src/{stores,components,api}/*.spec.ts` | 30 | store 状态流转、组件渲染、api 层封装（3 个 spec 文件） |
 
@@ -284,11 +289,13 @@ Invoke-RestMethod http://localhost:3000/api/history?limit=10
 
 | 接口 | 期望状态码 | 期望响应要点 |
 | --- | --- | --- |
-| `/api/analyze-resume` | 200 | `keywords` 非空、`score` 0–100 |
-| `/api/match-job` | 200 | `match_score` 0–100、`advantages`/`improvements` 数组 |
-| `/api/optimize-resume` | 200 | `summary`、`suggestions`/`missing_keywords` 数组 |
-| `/api/radar` | 200 | `dimensions` 长度 5，每项 `score` 0–100 |
+| `/api/analyze-resume` | 200 | `success=true`、`keywords` 非空、`score` 0–100、`meta.aiMode`/`meta.degraded` |
+| `/api/match-job` | 200 | `match_score` 0–100、`level` 四级枚举、`hits`/`gaps` 数组、`breakdown`、`meta` |
+| `/api/optimize-resume` | 200 | `summary`、`suggestions`/`missing_keywords` 数组、`meta` |
+| `/api/radar` | 200 | `dimensions` 长度 5（降级时由规则层推导，非空），每项 `score` 0–100、`meta` |
 | `/api/history` | 200 | `records` 含 `analysis`/`match`/`optimization`/`radar` 四类 |
+
+> **契约字段提醒**：四个业务接口现已统一返回 `success` 与 `meta`（含 `timings{bff,java,python,llm,total}`、`degraded`、`aiMode`）。LLM 不可用时接口返回 `200` + 规则层结果，并以 `meta.degraded=true` / `meta.aiMode=rule` 标记，前端 `DegradedBanner` 会据此提示「规则引擎」模式。
 
 > **字段契约提醒**：`/api/radar`（BFF 与 Java 一致）使用 `resume` / `jd` 字段；其余三接口使用 `resume_text` / `job_description`。这是**前端已对齐的既定契约**，非缺陷。
 
@@ -372,6 +379,7 @@ docker compose up -d --build
 ### 5.2 后续优化方向
 
 - **短期**：在可联网环境补跑 `docker compose up --build` 复验；修正 README 端口/命令；为 `/api/history` 增加分页；统一 LLM 降级的状态码语义（如引入 `degraded` 标记）。
+  > 进展：Java 层下游失败仍返回 `500`，但 Python 四接口已在成功响应体内通过 `meta.degraded` / `meta.aiMode` 统一暴露降级语义，前端 `DegradedBanner` 可据此提示；状态码层面的统一仍待后续。
 - **中期**：引入统一鉴权（网关 / BFF 中间件）；LLM 调用增加重试、超时降级与结果缓存；SQLite 迁移评估（PostgreSQL）。
 - **长期**：接入可观测性（OpenTelemetry + Prometheus + 日志聚合）；补齐 CI 的端到端集成测试；清理骨架残留模块。
 
@@ -382,8 +390,8 @@ docker compose up -d --build
 | 类别 | 文件 | 状态 |
 | --- | --- | --- |
 | 容器编排 | `docker-compose.yml`、四服务 `Dockerfile`、`frontend/nginx.conf`、`.dockerignore` | 已完成（config 通过；up 受环境限制未验证） |
-| Python 测试 | `python-service/tests/test_api.py`、`pytest.ini`、`requirements-dev.txt` | 已完成（**19 通过**） |
-| BFF 测试 | `bff/tests/api.test.ts`、`bff/vitest.config.ts`、`bff/package.json#test` | 已完成（**18 通过**） |
+| Python 测试 | `python-service/tests/test_api.py`、`pytest.ini`、`requirements-dev.txt` | 已完成（**21 通过**） |
+| BFF 测试 | `bff/tests/api.test.ts`、`bff/vitest.config.ts`、`bff/package.json#test` | 已完成（**19 通过**） |
 | Java 测试 | `java-service/src/test/java/com/careerlens/controller/CareerControllerTest.java`、`pom.xml` | 已完成（**10 通过**） |
 | 前端测试 | `frontend/src/{stores,components,api}/*.spec.ts` | 已完成（**30 通过**） |
 | CI | `.github/workflows/ci.yml`（Python/BFF/Java/前端四作业） | 已完成 |

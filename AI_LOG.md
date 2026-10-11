@@ -331,6 +331,31 @@ git checkout develop -- <path>   # .dockerignore / bff/.dockerignore / bff/Docke
 | Compose 配置校验 | `docker compose config` | ✅ 通过（四服务渲染正常） |
 | Compose 完整启动 | `docker compose up -d --build` | ❌ 失败：Docker Hub 网络不可达（环境限制） |
 
+### B.3 契约贯通改造（会话 5）
+
+**背景**：核查发现 Python 侧存在「契约与实现脱节」与「`rules.py` 孤儿模块」两处落差——`main.py` 未调用 `rules.py`，且未产出契约声明的 `meta`/`level`/`hits`/`gaps`/`qualityIssues`/`skills` 字段。经与用户确认，采纳「接线 `rules.py` + 补齐契约字段」方案。
+
+**Python 侧改动**（`python-service/main.py`、`tests/test_api.py`）：
+- 引入 `rules.py` 的 `compute_match`/`extract_skill_hits`/`detect_quality_issues`/`normalize_text`/`split_sections`/`build_learning_path` 等；
+- 新增 `build_meta()` 统一产出 `meta{timings{...},degraded,aiMode}`，`AI_MODE` 环境变量控制 `llm|hybrid|rule`；
+- 四接口（analyze/match/optimize/radar）补齐契约字段；LLM 失败降级时 `meta.degraded=true`、`meta.aiMode=rule`，雷达降级由规则层推导五维度（非空）；
+- 请求模型同时接受下划线与驼峰字段（`resume_text`/`resumeText`）。
+
+**BFF 侧改动**（`bff/src/app.ts`、`tests/api.test.ts`）：
+- 新增 `withBffMeta()`：保留下游 `meta`，追加 BFF 段耗时并重算 `total`，缺失时按降级兜底；
+- 四个接口统一透传 `success`/`meta`（match 另透传 `level`/`breakdown`/`hits`/`gaps`），catch 分支统一补 `success: false`。
+
+**复验结果**：
+
+| 验证项 | 命令 | 结果 |
+| --- | --- | --- |
+| Python 测试 | `.\.venv\Scripts\python.exe -m pytest -q` | ✅ 21 passed |
+| BFF 类型检查 | `npm run type-check` | ✅ 通过（exit 0） |
+| BFF 测试 | `npm test` | ✅ 19 passed（1 file） |
+| 前端测试 | `npm test -- --run` | ✅ 30 passed（3 files） |
+| 前端构建 | `npm run build` | ✅ 成功（约 8.4s） |
+| 契约校验 | `.\.venv\Scripts\python.exe ..\scripts\validate-contracts.py` | ✅ PASS=19 FAIL=0 |
+
 ### B.2 环境探测
 
 | 工具 | 版本/路径 |

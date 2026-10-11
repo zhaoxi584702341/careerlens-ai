@@ -15,11 +15,28 @@ import os
 import re
 from typing import Any, Optional
 
+import time
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from openai import OpenAI
 from pydantic import BaseModel
+
+# ===== 接入纯规则引擎（rules.py）：提供可解释的命中/缺口/质量问题，LLM 失败时作为降级档位 =====
+from rules import (
+    SKILL_DICT,
+    build_learning_path,
+    compute_match,
+    detect_language,
+    detect_quality_issues,
+    extract_skill_hits,
+    normalize_text as rules_normalize_text,
+    split_sections,
+)
+
+# AI_MODE 档位：可配置为 rule（纯规则，用于离线复现）/ llm / hybrid（默认）
+AI_MODE = os.getenv("AI_MODE", "hybrid").strip().lower()
 
 # 加载 .env（LLM_API_KEY / LLM_BASE_URL / LLM_MODEL）
 load_dotenv()
@@ -158,7 +175,8 @@ def clamp_score(value: Any) -> int:
 
 
 # ===== 请求/响应模型 =====
-# 修复点4：AnalyzeRequest 同时支持 resume_text（蛇形）和 resumeText（驼峰）
+# Java 转发层使用驼峰字段（resumeText / jobDescription），前端/BFF 对外使用蛇形字段，
+# 因此这里同时声明两种别名，保证任一形式的入参都能被正确解析。
 class AnalyzeRequest(BaseModel):
     resume_text: Optional[str] = None
     resumeText: Optional[str] = None
@@ -168,13 +186,29 @@ class AnalyzeRequest(BaseModel):
 
 
 class MatchRequest(BaseModel):
-    resume_text: str
-    job_description: str
+    resume_text: Optional[str] = None
+    resumeText: Optional[str] = None
+    job_description: Optional[str] = None
+    jobDescription: Optional[str] = None
+
+    def get_resume_text(self) -> str:
+        return self.resume_text or self.resumeText or ""
+
+    def get_job_description(self) -> str:
+        return self.job_description or self.jobDescription or ""
 
 
 class OptimizeRequest(BaseModel):
-    resume_text: str
-    job_description: str
+    resume_text: Optional[str] = None
+    resumeText: Optional[str] = None
+    job_description: Optional[str] = None
+    jobDescription: Optional[str] = None
+
+    def get_resume_text(self) -> str:
+        return self.resume_text or self.resumeText or ""
+
+    def get_job_description(self) -> str:
+        return self.job_description or self.jobDescription or ""
 
 
 class RadarRequest(BaseModel):
@@ -190,9 +224,173 @@ def error_payload(fields: dict[str, Any], message: str) -> dict[str, Any]:
 LLM_ERROR_MESSAGE = "LLM 调用失败，请检查 Python 服务 .env 中的 API Key、Base URL 与模型名称配置后重试"
 
 
+# ===== 契约 meta 构造：timings / degraded / aiMode =====
+# python 为本地计算耗时；llm 为调用大模型耗时（本地规则档位恒为 0），
+# total 供上游（Java/BFF）读取并累加自身耗时。bff / java 由各自上层补齐。
+def build_meta(python_ms: int, llm_ms: int, degraded: bool, ai_mode: str) -> dict[str, Any]:
+    return {
+        "timings": {
+            "python": python_ms,
+            "llm": llm_ms,
+            "total": python_ms + llm_ms,
+        },
+        "degraded": degraded,
+        "aiMode": ai_mode,
+    }
+
+
+# ===== LLM 语义结果归一化工具 =====
+def _as_str_list(value: Any) -> list[str]:
+    """把 LLM 返回值规范化为字符串列表（去空、去重、保序）。"""
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def _from_llm_hits(raw_hits: Any, ai_mode: str) -> list[dict[str, Any]]:
+    """把 LLM 返回的命中项规范化为契约 hits 结构，缺字段时补默认值。"""
+    result: list[dict[str, Any]] = []
+    if not isinstance(raw_hits, list):
+        return result
+    for item in raw_hits:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "skill": str(item.get("skill", "")),
+                "hitType": item.get("hitType") if item.get("hitType") in {"EXACT", "SYNONYM", "INFERRED"} else "INFERRED",
+                "confidence": item.get("confidence", 0.7),
+                "evidence": str(item.get("evidence", "")),
+                "source": str(item.get("source", f"llm.{ai_mode}")),
+            }
+        )
+    return result
+
+
+def _from_llm_gaps(raw_gaps: Any) -> list[dict[str, Any]]:
+    """把 LLM 返回的能力缺口规范化为契约 gaps 结构，学习路径缺失时按分类模板补齐。"""
+    result: list[dict[str, Any]] = []
+    if not isinstance(raw_gaps, list):
+        return result
+    for item in raw_gaps:
+        if not isinstance(item, dict):
+            continue
+        skill = str(item.get("skill", ""))
+        importance = item.get("importance") if item.get("importance") in {"high", "medium", "low"} else "medium"
+        learning_path = _as_str_list(item.get("learningPath")) or build_learning_path(skill)
+        result.append(
+            {
+                "skill": skill,
+                "importance": importance,
+                "suggestion": str(item.get("suggestion", "")),
+                "learningPath": learning_path,
+            }
+        )
+    return result
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"status": "ok", "service": "careerlens-ai-python", "llm_enabled": llm_enabled}
+
+
+# ===== POST /api/analyze：规则层结构化解析 + LLM 语义抽取，返回可解释的简历解析结果 =====
+@app.post("/api/analyze")
+def analyze(payload: AnalyzeRequest):
+    started = time.perf_counter()
+    text = payload.get_resume_text() or ""
+    if not text.strip():
+        return error_payload(
+            {"success": False, "keywords": [], "score": 0},
+            "请求参数错误：resume_text 不能为空",
+        )
+
+    # 规则层：文本清洗（含全角转半角）、分节识别、技能归一化、结构化质量问题检测
+    cleaned = rules_normalize_text(text)
+    sections = split_sections(cleaned)
+    skill_hits = extract_skill_hits(cleaned)
+    normalized = [
+        {
+            "canonical": h["canonical"],
+            "raw": h["raw"],
+            "category": h["category"],
+            "confidence": h["confidence"],
+        }
+        for h in skill_hits
+    ]
+    rule_keywords = [h["canonical"] for h in skill_hits]
+    quality_issues = detect_quality_issues(cleaned, sections)
+    language = detect_language(cleaned)
+
+    keywords: list[str] = list(rule_keywords)
+    llm_ms = 0
+    llm_keywords: list[str] = []
+    llm_score: Optional[int] = None
+
+    if AI_MODE != "rule":
+        llm_started = time.perf_counter()
+        try:
+            data = call_llm_json(
+                "你是一名资深简历解析专家。请对用户简历文本做语义级技能抽取，"
+                "不仅要识别明确写出的技术栈名称，还要识别语义等价、简写、"
+                "以及用自然语言描述的能力（例如“负责前端页面开发”应抽取“前端开发”，"
+                "“搭建自动化测试”应抽取“自动化测试”）。"
+                "必须只返回 JSON，且严格遵循如下结构："
+                '{"keywords": ["技能1", "技能2"], "score": 72}。'
+                "keywords 为技能名数组（去重、不超过 20 个）；"
+                "score 为简历整体竞争力的 0 到 100 整数评分。"
+                "不要输出 JSON 以外的任何内容。",
+                f"简历文本：\n{cleaned}",
+            )
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            llm_keywords = normalize_llm_skills(data.get("keywords"))
+            if data.get("score") is not None:
+                llm_score = clamp_score(data.get("score"))
+            for skill in llm_keywords:
+                if skill not in keywords:
+                    keywords.append(skill)
+        except Exception as exc:  # noqa: BLE001 - 统一转为降级结果
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            logger.warning("[analyze] LLM 调用失败，降级到本地规则: %s", exc)
+            llm_keywords = []
+            llm_score = None
+
+    # 命中 LLM 时以 LLM 评分为准，否则使用本地规则的可复现评分
+    score = llm_score if llm_score is not None else rule_score(dict.fromkeys(keywords), cleaned)
+    ai_mode = "rule" if not llm_keywords and llm_score is None else "hybrid"
+
+    python_ms = int((time.perf_counter() - started) * 1000)
+    return {
+        "success": True,
+        "keywords": keywords,
+        "score": score,
+        "cleaned_text": cleaned,
+        "resume": {
+            "cleaned": {
+                "sections": sections,
+                "wordCount": len(re.sub(r"\s", "", cleaned)),
+                "language": language,
+            }
+        },
+        "qualityIssues": quality_issues,
+        "skills": {
+            "normalized": normalized,
+            "unrecognized": [],
+        },
+        "meta": build_meta(python_ms, llm_ms, degraded=ai_mode == "rule", ai_mode=ai_mode),
+        "message": f"共识别到 {len(keywords)} 个关键词，综合评分 {score} 分。",
+    }
+
+
+def rule_score(keywords: Any, cleaned: str) -> int:
+    """本地规则评分：核心技能命中数 + 简历篇幅的加权，保证离线可复现。"""
+    core_hits = len([k for k in keywords if k in CORE_SKILLS])
+    return clamp_score(min(core_hits * 8, 80) + min(len(cleaned) // 100, 20))
 
 
 def normalize_llm_skills(raw_skills: Any) -> list[str]:
@@ -290,138 +488,230 @@ def analyze(payload: AnalyzeRequest):
     }
 
 
-# ===== POST /api/match：技能匹配分析，返回匹配度、命中项、能力缺口 =====
+# ===== POST /api/match：规则层可解释匹配 + LLM 语义匹配，返回匹配度、命中项与能力缺口 =====
 @app.post("/api/match")
 def match(payload: MatchRequest):
-    resume_text = payload.resume_text or ""
-    jd = payload.job_description or ""
-    if not resume_text.strip():
-        return error_payload(
-            {"match_score": 0, "advantages": [], "improvements": [], "matched_skills": [], "missing_skills": []},
-            "请求参数错误：resume_text 不能为空",
-        )
-    if not jd.strip():
-        return error_payload(
-            {"match_score": 0, "advantages": [], "improvements": [], "matched_skills": [], "missing_skills": []},
-            "请求参数错误：job_description 不能为空",
-        )
-
-    # 规则层：技能集合求交与差集，得到命中项与能力缺口
-    resume_skills = set(extract_skills(resume_text))
-    jd_skills = set(extract_skills(jd))
-    matched_skills = sorted(resume_skills & jd_skills)
-    missing_skills = sorted(jd_skills - resume_skills)
-
-    try:
-        data = call_llm_json(
-            "你是一名资深招聘顾问。请对比用户简历与目标岗位描述，给出匹配度评分、优势与待改进点。"
-            "必须只返回 JSON，且严格遵循如下结构："
-            '{"match_score": 78, "advantages": ["优势1", "优势2"], '
-            '"improvements": ["待改进1", "待改进2"], '
-            '"matched_skills": ["命中技能1"], "missing_skills": ["缺口技能1"]}。'
-            "match_score 必须为 0 到 100 之间的整数。不要输出 JSON 以外的任何内容。",
-            f"简历文本：\n{resume_text}\n\n目标岗位描述：\n{jd}",
-        )
-    except Exception as exc:  # noqa: BLE001 - 统一转为 500 友好提示
-        print(f"[match] LLM 调用失败: {exc}")
-        logger.warning("[match] LLM 调用失败，降级到本地规则: %s", exc)
-        # 修复点1：统一降级策略 - 返回 200 + 本地结果 + 警告
-        return JSONResponse(
-            status_code=200,
-            content=error_payload(
-                {"match_score": 0, "advantages": [], "improvements": [], "matched_skills": matched_skills, "missing_skills": missing_skills},
-                f"{LLM_ERROR_MESSAGE}（已降级使用本地规则匹配）",
-            ),
-        )
-
-    advantages = data.get("advantages") if isinstance(data.get("advantages"), list) else []
-    improvements = data.get("improvements") if isinstance(data.get("improvements"), list) else []
-    llm_matched = data.get("matched_skills") if isinstance(data.get("matched_skills"), list) else matched_skills
-    llm_missing = data.get("missing_skills") if isinstance(data.get("missing_skills"), list) else missing_skills
-
-    return {
-        "match_score": clamp_score(data.get("match_score")),
-        "advantages": advantages,
-        "improvements": improvements,
-        "matched_skills": llm_matched,
-        "missing_skills": llm_missing,
-        "message": "匹配完成",
+    started = time.perf_counter()
+    resume_text = payload.get_resume_text()
+    jd = payload.get_job_description()
+    empty_fields: dict[str, Any] = {
+        "success": False,
+        "match_score": 0,
+        "advantages": [],
+        "improvements": [],
+        "matched_skills": [],
+        "missing_skills": [],
     }
-
-
-# ===== POST /api/optimize：调用 LLM 生成简历优化建议 =====
-@app.post("/api/optimize")
-def optimize(payload: OptimizeRequest):
-    resume_text = payload.resume_text or ""
-    jd = payload.job_description or ""
-    empty_fields = {"summary": "", "suggestions": [], "missing_keywords": []}
     if not resume_text.strip():
         return error_payload(empty_fields, "请求参数错误：resume_text 不能为空")
     if not jd.strip():
         return error_payload(empty_fields, "请求参数错误：job_description 不能为空")
 
-    try:
-        data = call_llm_json(
-            "你是一名资深求职顾问。请根据用户提供的简历文本与目标岗位描述，给出简历优化建议。"
-            "必须只返回 JSON，且严格遵循如下结构："
-            '{"summary": "总体评价", "suggestions": ["建议1", "建议2", "建议3", "建议4"], '
-            '"missing_keywords": ["关键词1", "关键词2"]}。'
-            "不要输出 JSON 以外的任何内容。",
-            f"简历文本：\n{resume_text}\n\n目标岗位描述：\n{jd}",
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[optimize] LLM 调用失败: {exc}")
-        logger.warning("[optimize] LLM 调用失败，降级到空结果: %s", exc)
-        # 修复点1：统一降级策略
-        return JSONResponse(
-            status_code=200,
-            content=error_payload(empty_fields, f"{LLM_ERROR_MESSAGE}（已降级，无法生成优化建议）"),
-        )
+    # 规则层：显式可复现打分，产出 level / breakdown / hits / gaps
+    rule_match = compute_match(resume_text, jd)
 
+    expected = _estimate_expected_dimensions(rule_match)
+    result: dict[str, Any] = dict(expected)
+    llm_ms = 0
+    ai_mode = "rule"
+
+    if AI_MODE != "rule":
+        llm_started = time.perf_counter()
+        try:
+            data = call_llm_json(
+                "你是一名资深招聘顾问。请对比用户简历与目标岗位描述，给出匹配度评分、优势、待改进点、"
+                "命中项（含 hitType: EXACT/SYNONYM/INFERRED 与 evidence 原文证据）以及能力缺口"
+                "（含 importance: high/medium/low、suggestion 与 learningPath 学习路径数组）。"
+                "必须只返回 JSON，且严格遵循如下结构："
+                '{"match_score": 78, "level": "GOOD_FIT", "advantages": ["优势1"], '
+                '"improvements": ["待改进1"], "matched_skills": ["命中技能1"], "missing_skills": ["缺口技能1"], '
+                '"hits": [{"skill": "Vue", "hitType": "EXACT", "evidence": "熟悉Vue3", "source": "resume"}], '
+                '"gaps": [{"skill": "React", "importance": "high", "suggestion": "补充React项目", "learningPath": ["学习React基础"]}]}。'
+                "match_score 必须为 0 到 100 之间的整数；level 取值 EXCELLENT/GOOD_FIT/PARTIAL_FIT/WEAK_FIT。"
+                "不要输出 JSON 以外的任何内容。",
+                f"简历文本：\n{resume_text}\n\n目标岗位描述：\n{jd}",
+            )
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            ai_mode = "hybrid"
+            score = clamp_score(data.get("match_score"))
+            level = data.get("level") if data.get("level") in {"EXCELLENT", "GOOD_FIT", "PARTIAL_FIT", "WEAK_FIT"} else _level_for_score(score)
+            result.update(
+                {
+                    "match_score": score,
+                    "level": level,
+                    "advantages": _as_str_list(data.get("advantages")) or expected["advantages"],
+                    "improvements": _as_str_list(data.get("improvements")) or expected["improvements"],
+                    "matched_skills": _as_str_list(data.get("matched_skills")) or expected["matched_skills"],
+                    "missing_skills": _as_str_list(data.get("missing_skills")) or expected["missing_skills"],
+                    "hits": _from_llm_hits(data.get("hits"), ai_mode) or expected["hits"],
+                    "gaps": _from_llm_gaps(data.get("gaps")) or expected["gaps"],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - 统一转为降级结果
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            logger.warning("[match] LLM 调用失败，降级到本地规则: %s", exc)
+            ai_mode = "rule"
+
+    python_ms = int((time.perf_counter() - started) * 1000)
+    result["success"] = True
+    result["meta"] = build_meta(python_ms, llm_ms, degraded=ai_mode == "rule", ai_mode=ai_mode)
+    result["message"] = (
+        f"{LLM_ERROR_MESSAGE}（已降级使用本地规则匹配）" if ai_mode == "rule" else "匹配完成"
+    )
+    return result
+
+
+def _level_for_score(score: int) -> str:
+    """按分数区间映射匹配等级，与 rules.LEVEL_BANDS 保持一致。"""
+    for threshold, band in ((85, "EXCELLENT"), (70, "GOOD_FIT"), (50, "PARTIAL_FIT"), (0, "WEAK_FIT")):
+        if score >= threshold:
+            return band
+    return "WEAK_FIT"
+
+
+def _estimate_expected_dimensions(rule_match: dict[str, Any]) -> dict[str, Any]:
+    """基于规则层命中/缺口生成 advantages / improvements 的降级文案。"""
+    advantages = [f"已具备岗位要求的 {skill}" for skill in rule_match["matched_skills"][:5]]
+    improvements = [
+        f"补齐「{gap['skill']}」相关经历（{gap['importance']} 优先级）" for gap in rule_match["gaps"][:5]
+    ]
     return {
-        "summary": data.get("summary") or "",
-        "suggestions": data.get("suggestions") if isinstance(data.get("suggestions"), list) else [],
-        "missing_keywords": data.get("missing_keywords") if isinstance(data.get("missing_keywords"), list) else [],
-        "message": "优化建议已生成",
+        "match_score": rule_match["score"],
+        "level": rule_match["level"],
+        "breakdown": rule_match["breakdown"],
+        "hits": rule_match["hits"],
+        "gaps": rule_match["gaps"],
+        "matched_skills": rule_match["matched_skills"],
+        "missing_skills": rule_match["missing_skills"],
+        "advantages": advantages,
+        "improvements": improvements,
     }
 
 
-# ===== POST /api/radar：调用 LLM 做多维度能力打分 =====
+# ===== POST /api/optimize：调用 LLM 生成简历优化建议，附规则层命中的缺失关键词 =====
+@app.post("/api/optimize")
+def optimize(payload: OptimizeRequest):
+    started = time.perf_counter()
+    resume_text = payload.get_resume_text()
+    jd = payload.get_job_description()
+    empty_fields: dict[str, Any] = {"success": False, "summary": "", "suggestions": [], "missing_keywords": []}
+    if not resume_text.strip():
+        return error_payload(empty_fields, "请求参数错误：resume_text 不能为空")
+    if not jd.strip():
+        return error_payload(empty_fields, "请求参数错误：job_description 不能为空")
+
+    # 规则层：命中缺失关键词，作为降级兜底与 LLM 结果的补充
+    rule_match = compute_match(resume_text, jd)
+    rule_missing = rule_match["missing_skills"]
+
+    summary = ""
+    suggestions: list[str] = []
+    missing_keywords: list[str] = list(rule_missing)
+    llm_ms = 0
+    ai_mode = "rule"
+
+    if AI_MODE != "rule":
+        llm_started = time.perf_counter()
+        try:
+            data = call_llm_json(
+                "你是一名资深求职顾问。请根据用户提供的简历文本与目标岗位描述，给出简历优化建议。"
+                "必须只返回 JSON，且严格遵循如下结构："
+                '{"summary": "总体评价", "suggestions": ["建议1", "建议2", "建议3", "建议4"], '
+                '"missing_keywords": ["关键词1", "关键词2"]}。'
+                "不要输出 JSON 以外的任何内容。",
+                f"简历文本：\n{resume_text}\n\n目标岗位描述：\n{jd}",
+            )
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            ai_mode = "hybrid"
+            summary = str(data.get("summary") or "")
+            suggestions = _as_str_list(data.get("suggestions"))
+            llm_missing = _as_str_list(data.get("missing_keywords"))
+            # 合并 LLM 与规则层缺失关键词，去重保序
+            for kw in llm_missing:
+                if kw not in missing_keywords:
+                    missing_keywords.append(kw)
+        except Exception as exc:  # noqa: BLE001
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            logger.warning("[optimize] LLM 调用失败，降级到规则结果: %s", exc)
+            ai_mode = "rule"
+
+    python_ms = int((time.perf_counter() - started) * 1000)
+    return {
+        "success": True,
+        "summary": summary,
+        "suggestions": suggestions,
+        "missing_keywords": missing_keywords,
+        "meta": build_meta(python_ms, llm_ms, degraded=ai_mode == "rule", ai_mode=ai_mode),
+        "message": f"{LLM_ERROR_MESSAGE}（已降级，仅返回规则层缺口关键词）" if ai_mode == "rule" else "优化建议已生成",
+    }
+
+
+# ===== POST /api/radar：调用 LLM 做多维度能力打分，降级时按规则层指标构造雷达维度 =====
 @app.post("/api/radar")
 def radar(payload: RadarRequest):
+    started = time.perf_counter()
     resume = payload.resume or ""
     jd = payload.jd or ""
     if not resume.strip():
-        return error_payload({"dimensions": []}, "请求参数错误：resume 不能为空")
+        return error_payload({"success": False, "dimensions": []}, "请求参数错误：resume 不能为空")
     if not jd.strip():
-        return error_payload({"dimensions": []}, "请求参数错误：jd 不能为空")
+        return error_payload({"success": False, "dimensions": []}, "请求参数错误：jd 不能为空")
 
-    try:
-        data = call_llm_json(
-            "你是一名资深职业能力评估专家。请根据用户简历与目标岗位描述，从五个维度评估候选人能力。"
-            "必须只返回 JSON，且严格遵循如下结构："
-            '{"dimensions": [{"name": "技术匹配度", "score": 78}, {"name": "项目经验", "score": 65}, '
-            '{"name": "成果量化", "score": 50}, {"name": "表达能力", "score": 72}, {"name": "成长潜力", "score": 80}]}。'
-            "每个维度的 score 必须为 0 到 100 之间的整数。不要输出 JSON 以外的任何内容。",
-            f"简历文本：\n{resume}\n\n目标岗位描述：\n{jd}",
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"[radar] LLM 调用失败: {exc}")
-        logger.warning("[radar] LLM 调用失败，降级到空结果: %s", exc)
-        # 修复点1：统一降级策略
-        return JSONResponse(
-            status_code=200,
-            content=error_payload({"dimensions": []}, f"{LLM_ERROR_MESSAGE}（已降级，无法生成雷达图数据）"),
-        )
+    dimensions: list[dict[str, Any]] = []
+    llm_ms = 0
+    ai_mode = "rule"
 
-    raw_dimensions = data.get("dimensions") if isinstance(data.get("dimensions"), list) else []
-    dimensions = [
-        {"name": str(item.get("name", "")), "score": clamp_score(item.get("score"))}
-        for item in raw_dimensions
-        if isinstance(item, dict)
+    if AI_MODE != "rule":
+        llm_started = time.perf_counter()
+        try:
+            data = call_llm_json(
+                "你是一名资深职业能力评估专家。请根据用户简历与目标岗位描述，从五个维度评估候选人能力。"
+                "必须只返回 JSON，且严格遵循如下结构："
+                '{"dimensions": [{"name": "技术匹配度", "score": 78}, {"name": "项目经验", "score": 65}, '
+                '{"name": "成果量化", "score": 50}, {"name": "表达能力", "score": 72}, {"name": "成长潜力", "score": 80}]}。'
+                "每个维度的 score 必须为 0 到 100 之间的整数。不要输出 JSON 以外的任何内容。",
+                f"简历文本：\n{resume}\n\n目标岗位描述：\n{jd}",
+            )
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            ai_mode = "hybrid"
+            raw_dimensions = data.get("dimensions") if isinstance(data.get("dimensions"), list) else []
+            dimensions = [
+                {"name": str(item.get("name", "")), "score": clamp_score(item.get("score"))}
+                for item in raw_dimensions
+                if isinstance(item, dict)
+            ]
+        except Exception as exc:  # noqa: BLE001
+            llm_ms = int((time.perf_counter() - llm_started) * 1000)
+            logger.warning("[radar] LLM 调用失败，降级到规则维度: %s", exc)
+            ai_mode = "rule"
+
+    if ai_mode == "rule":
+        dimensions = _rule_radar_dimensions(resume, jd)
+
+    python_ms = int((time.perf_counter() - started) * 1000)
+    return {
+        "success": True,
+        "dimensions": dimensions,
+        "meta": build_meta(python_ms, llm_ms, degraded=ai_mode == "rule", ai_mode=ai_mode),
+        "message": f"{LLM_ERROR_MESSAGE}（已降级，基于规则层指标生成雷达）" if ai_mode == "rule" else "雷达图数据已生成",
+    }
+
+
+def _rule_radar_dimensions(resume: str, jd: str) -> list[dict[str, Any]]:
+    """降级雷达：由规则层匹配度与命中/缺口推导五个维度的分数，保证可复现且非空。"""
+    rule_match = compute_match(resume, jd)
+    score = rule_match["score"]
+    matched = len(rule_match["matched_skills"])
+    total_required = matched + len(rule_match["missing_skills"])
+    coverage = round(100 * matched / total_required) if total_required else score
+    tech = score
+    return [
+        {"name": "技术匹配度", "score": clamp_score(tech)},
+        {"name": "项目经验", "score": clamp_score(round((tech + coverage) / 2))},
+        {"name": "成果量化", "score": clamp_score(round(coverage * 0.8))},
+        {"name": "表达能力", "score": clamp_score(round((tech + 60) / 2))},
+        {"name": "成长潜力", "score": clamp_score(round((tech + coverage + 100) / 3))},
     ]
-
-    return {"dimensions": dimensions, "message": "雷达图数据已生成"}
 
 
 if __name__ == "__main__":

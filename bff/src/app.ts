@@ -27,6 +27,31 @@ app.use(express.json())
 const LLM_ERROR_MESSAGE = 'LLM 调用失败，请检查 Java / Python 服务配置与 .env 中的 API Key、Base URL 与模型名称后重试'
 
 /**
+ * 契约 meta 组装：BFF 在网关层补齐自身耗时，并把下游（Python/Java）已产出的
+ * timings / degraded / aiMode 向上透传，保证前端拿到的 meta 是链路完整视图。
+ * 若下游未返回 meta（老版本/异常），则按降级处理，aiMode 回退为 rule。
+ */
+function withBffMeta<T extends Record<string, unknown>>(data: T, bffMs: number, degradedFallback: boolean): T & {
+  success: boolean
+  meta: Record<string, unknown>
+} {
+  const upstreamMeta = (data.meta as Record<string, unknown> | undefined) ?? {}
+  const upstreamTimings = (upstreamMeta.timings as Record<string, number> | undefined) ?? {}
+  const aiMode = (upstreamMeta.aiMode as string | undefined) ?? (degradedFallback ? 'rule' : 'hybrid')
+  const degraded = (upstreamMeta.degraded as boolean | undefined) ?? degradedFallback
+  const total = Number(upstreamTimings.total ?? 0) + bffMs
+  return {
+    ...data,
+    success: (data.success as boolean | undefined) ?? !degraded,
+    meta: {
+      timings: { ...upstreamTimings, bff: bffMs, total },
+      degraded,
+      aiMode,
+    },
+  }
+}
+
+/**
  * 转发请求到 Java 服务（Java 内部再转发到 Python，最终调用 LLM）。
  * 统一处理超时、网络异常与非 2xx 响应，成功时返回解析后的 JSON 数据。
  * 失败时抛出错误，由各接口的 catch 统一转换为 500 友好提示。
@@ -82,28 +107,48 @@ app.post('/api/analyze-resume', async (req: Request, res: Response) => {
 
     // 2. 调用 Java 服务获取分析结果（Java 内部转发到 Python）
     //    Java DTO 使用驼峰字段 resumeText
-    const data = await callJava<{ keywords?: string[]; score?: number; message?: string }>(
-      '/api/analyze',
-      { resumeText: resume_text },
-    )
+    const javaStarted = Date.now()
+    const data = await callJava<{
+      success?: boolean
+      keywords?: string[]
+      score?: number
+      cleaned_text?: string
+      resume?: unknown
+      qualityIssues?: unknown[]
+      skills?: unknown
+      meta?: unknown
+      message?: string
+    }>('/api/analyze', { resumeText: resume_text })
+    const bffMs = Date.now() - javaStarted
 
     const keywords = Array.isArray(data.keywords) ? data.keywords : []
     const score = Math.min(100, Math.max(0, Number(data.score) || 0))
 
-    const result = {
-      keywords,
-      score,
-      message: data.message ?? `共识别到 ${keywords.length} 个关键词，综合评分 ${score} 分。`,
-    }
+    // 3. 透传 Python 契约字段（结构化解析 / 质量问题 / 归一化技能），并补齐 BFF 层 meta
+    const result = withBffMeta(
+      {
+        success: data.success,
+        keywords,
+        score,
+        cleaned_text: data.cleaned_text ?? resume_text,
+        resume: data.resume,
+        qualityIssues: Array.isArray(data.qualityIssues) ? data.qualityIssues : [],
+        skills: data.skills ?? { normalized: [], unrecognized: [] },
+        meta: data.meta,
+        message: data.message ?? `共识别到 ${keywords.length} 个关键词，综合评分 ${score} 分。`,
+      },
+      bffMs,
+      false,
+    )
 
-    // 3. 将结构化结果写入数据库，关联已生成的简历 ID
+    // 4. 将结构化结果写入数据库，关联已生成的简历 ID
     saveAnalysis(resumeId, JSON.stringify(result))
 
-    // 4. 保持原有响应格式返回给前端
+    // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[analyze-resume] Java 服务调用失败:', error)
-    res.status(500).json({ keywords: [], score: 0, message: LLM_ERROR_MESSAGE })
+    res.status(500).json({ success: false, keywords: [], score: 0, message: LLM_ERROR_MESSAGE })
   }
 })
 
@@ -127,32 +172,52 @@ app.post('/api/match-job', async (req: Request, res: Response) => {
 
     // 2. 调用 Java 服务获取匹配结果（Java 内部转发到 Python）
     //    Java DTO 使用驼峰字段 resumeText / jobDescription
+    const javaStarted = Date.now()
     const data = await callJava<{
+      success?: boolean
       match_score?: number
+      level?: string
+      breakdown?: unknown
+      hits?: unknown[]
+      gaps?: unknown[]
       advantages?: string[]
       improvements?: string[]
       matched_skills?: string[]
       missing_skills?: string[]
+      meta?: unknown
       message?: string
     }>('/api/match', { resumeText: resume_text, jobDescription: job_description })
+    const bffMs = Date.now() - javaStarted
 
-    const result = {
-      match_score: Math.min(100, Math.max(0, Number(data.match_score) || 0)),
-      advantages: Array.isArray(data.advantages) ? data.advantages : [],
-      improvements: Array.isArray(data.improvements) ? data.improvements : [],
-      matched_skills: Array.isArray(data.matched_skills) ? data.matched_skills : [],
-      missing_skills: Array.isArray(data.missing_skills) ? data.missing_skills : [],
-      message: data.message ?? '匹配完成',
-    }
+    // 3. 透传 Python 契约字段（匹配等级 / 维度分解 / 命中 / 缺口），并补齐 BFF 层 meta
+    const result = withBffMeta(
+      {
+        success: data.success,
+        match_score: Math.min(100, Math.max(0, Number(data.match_score) || 0)),
+        level: data.level ?? '',
+        breakdown: data.breakdown,
+        hits: Array.isArray(data.hits) ? data.hits : [],
+        gaps: Array.isArray(data.gaps) ? data.gaps : [],
+        advantages: Array.isArray(data.advantages) ? data.advantages : [],
+        improvements: Array.isArray(data.improvements) ? data.improvements : [],
+        matched_skills: Array.isArray(data.matched_skills) ? data.matched_skills : [],
+        missing_skills: Array.isArray(data.missing_skills) ? data.missing_skills : [],
+        meta: data.meta,
+        message: data.message ?? '匹配完成',
+      },
+      bffMs,
+      false,
+    )
 
-    // 3. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
+    // 4. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
     saveMatch(resumeId, jobId, JSON.stringify(result))
 
-    // 4. 保持原有响应格式返回给前端
+    // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[match-job] Java 服务调用失败:', error)
     res.status(500).json({
+      success: false,
       match_score: 0,
       advantages: [],
       improvements: [],
@@ -181,28 +246,40 @@ app.post('/api/optimize-resume', async (req: Request, res: Response) => {
 
     // 2. 调用 Java 服务获取优化建议（Java 内部转发到 Python）
     //    Java DTO 使用驼峰字段 resumeText / jobDescription
+    const javaStarted = Date.now()
     const data = await callJava<{
+      success?: boolean
       summary?: string
       suggestions?: string[]
       missing_keywords?: string[]
+      meta?: unknown
       message?: string
     }>('/api/optimize', { resumeText: resume_text, jobDescription: job_description })
+    const bffMs = Date.now() - javaStarted
 
-    const result = {
-      summary: data.summary ?? '',
-      suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
-      missing_keywords: Array.isArray(data.missing_keywords) ? data.missing_keywords : [],
-      message: data.message ?? '优化建议已生成',
-    }
+    // 3. 透传 Python 契约字段（summary / 建议 / 缺失关键词），并补齐 BFF 层 meta
+    const result = withBffMeta(
+      {
+        success: data.success,
+        summary: data.summary ?? '',
+        suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
+        missing_keywords: Array.isArray(data.missing_keywords) ? data.missing_keywords : [],
+        meta: data.meta,
+        message: data.message ?? '优化建议已生成',
+      },
+      bffMs,
+      false,
+    )
 
-    // 3. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
+    // 4. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
     saveOptimization(resumeId, jobId, JSON.stringify(result))
 
-    // 4. 保持原有响应格式返回给前端
+    // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[optimize-resume] Java 服务调用失败:', error)
     res.status(500).json({
+      success: false,
       summary: '',
       suggestions: [],
       missing_keywords: [],
@@ -231,10 +308,14 @@ app.post('/api/radar', async (req: Request, res: Response) => {
 
     // 2. 调用 Java 服务获取雷达评估结果（Java 内部转发到 Python）
     //    Java 端 radar DTO 使用 resume / jd 字段（与 Python 一致）
+    const javaStarted = Date.now()
     const data = await callJava<{
+      success?: boolean
       dimensions?: { name?: string; score?: number }[]
+      meta?: unknown
       message?: string
     }>('/api/radar', { resume, jd })
+    const bffMs = Date.now() - javaStarted
 
     // 规范化维度数据，分数限制在 0-100 范围内
     const dimensions = (Array.isArray(data.dimensions) ? data.dimensions : []).map((item) => ({
@@ -242,16 +323,27 @@ app.post('/api/radar', async (req: Request, res: Response) => {
       score: Math.min(100, Math.max(0, Number(item?.score) || 0)),
     }))
 
-    const result = { dimensions, message: data.message ?? '雷达图数据已生成' }
+    // 3. 透传 Python 契约字段（维度 / meta），并补齐 BFF 层 meta
+    const result = withBffMeta(
+      {
+        success: data.success,
+        dimensions,
+        meta: data.meta,
+        message: data.message ?? '雷达图数据已生成',
+      },
+      bffMs,
+      false,
+    )
 
-    // 3. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
+    // 4. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
     saveRadar(resumeId, jobId, JSON.stringify(result))
 
-    // 4. 保持原有响应格式返回给前端
+    // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[radar] Java 服务调用失败:', error)
     res.status(500).json({
+      success: false,
       dimensions: [],
       message: LLM_ERROR_MESSAGE,
     })

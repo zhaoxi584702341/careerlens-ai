@@ -88,13 +88,35 @@ describe('POST /api/analyze-resume', () => {
   })
 
   it('正常请求返回规范化结果并持久化', async () => {
-    callJavaMock.mockResolvedValueOnce({ keywords: ['Java', 'MySQL'], score: 72, message: 'ok' })
+    callJavaMock.mockResolvedValueOnce({
+      keywords: ['Java', 'MySQL'],
+      score: 72,
+      cleaned_text: '5年Java开发，熟悉MySQL',
+      resume: { cleaned: { sections: ['技能'], wordCount: 12, language: 'zh' } },
+      qualityIssues: [{ code: 'QUANTIFY_LOW', severity: 'low' }],
+      skills: { normalized: [{ canonical: 'Java' }], unrecognized: [] },
+      meta: { timings: { python: 30, llm: 800, total: 830 }, degraded: false, aiMode: 'hybrid' },
+      message: 'ok',
+    })
     const res = await request(app)
       .post('/api/analyze-resume')
       .send({ resume_text: '5年Java开发，熟悉MySQL' })
     expect(res.status).toBe(200)
     expect(res.body.keywords).toEqual(['Java', 'MySQL'])
     expect(res.body.score).toBe(72)
+
+    // 透传 Python 契约字段
+    expect(res.body.success).toBe(true)
+    expect(res.body.cleaned_text).toBe('5年Java开发，熟悉MySQL')
+    expect(res.body.resume.cleaned.sections).toEqual(['技能'])
+    expect(Array.isArray(res.body.qualityIssues)).toBe(true)
+    expect(Array.isArray(res.body.skills.normalized)).toBe(true)
+
+    // BFF 补齐 meta：保留下游耗时 + 追加 bff 耗时与 total
+    expect(res.body.meta.degraded).toBe(false)
+    expect(res.body.meta.aiMode).toBe('hybrid')
+    expect(res.body.meta.timings).toHaveProperty('bff')
+    expect(res.body.meta.timings.total).toBeGreaterThanOrEqual(830)
 
     // 验证已写入历史记录
     const history = await request(app).get('/api/history?limit=1')
@@ -108,6 +130,7 @@ describe('POST /api/analyze-resume', () => {
       .post('/api/analyze-resume')
       .send({ resume_text: '简历文本' })
     expect(res.status).toBe(500)
+    expect(res.body.success).toBe(false)
     expect(res.body.message).toContain('LLM 调用失败')
   })
 
@@ -137,10 +160,15 @@ describe('POST /api/match-job', () => {
   it('正常请求返回完整匹配结构', async () => {
     callJavaMock.mockResolvedValueOnce({
       match_score: 65,
+      level: 'PARTIAL_FIT',
+      breakdown: { mandatory: 60, optional: 70, levelFit: 80 },
+      hits: [{ skill: 'Vue', hitType: 'EXACT', confidence: 1, source: 'resume' }],
+      gaps: [{ skill: 'React', importance: 'high', learningPath: ['基础语法', 'Hooks'] }],
       advantages: ['3年前端开发经验'],
       improvements: ['缺少React'],
       matched_skills: ['Vue'],
       missing_skills: ['React'],
+      meta: { timings: { python: 40, llm: 900, total: 940 }, degraded: false, aiMode: 'hybrid' },
       message: '匹配完成',
     })
     const res = await request(app)
@@ -150,6 +178,21 @@ describe('POST /api/match-job', () => {
     expect(res.body.match_score).toBe(65)
     expect(res.body.matched_skills).toEqual(['Vue'])
     expect(res.body.missing_skills).toEqual(['React'])
+
+    // 透传 Python 契约字段
+    expect(res.body.success).toBe(true)
+    expect(res.body.level).toBe('PARTIAL_FIT')
+    expect(res.body.breakdown).toEqual({ mandatory: 60, optional: 70, levelFit: 80 })
+    expect(res.body.hits).toHaveLength(1)
+    expect(res.body.hits[0].skill).toBe('Vue')
+    expect(res.body.gaps[0].skill).toBe('React')
+    expect(res.body.gaps[0].learningPath).toEqual(['基础语法', 'Hooks'])
+
+    // BFF 补齐 meta
+    expect(res.body.meta.degraded).toBe(false)
+    expect(res.body.meta.aiMode).toBe('hybrid')
+    expect(res.body.meta.timings).toHaveProperty('bff')
+    expect(res.body.meta.timings.total).toBeGreaterThanOrEqual(940)
   })
 
   it('下游失败时缺失字段为空数组（结构稳定）', async () => {
@@ -158,8 +201,22 @@ describe('POST /api/match-job', () => {
       .post('/api/match-job')
       .send({ resume_text: '简历', job_description: '岗位' })
     expect(res.status).toBe(500)
+    expect(res.body.success).toBe(false)
     expect(res.body.advantages).toEqual([])
     expect(res.body.improvements).toEqual([])
+  })
+
+  it('下游未返回 meta 时降级为 rule 模式', async () => {
+    callJavaMock.mockResolvedValueOnce({ match_score: 50, matched_skills: [], missing_skills: [] })
+    const res = await request(app)
+      .post('/api/match-job')
+      .send({ resume_text: '简历', job_description: '岗位' })
+    expect(res.status).toBe(200)
+    // 兼容旧响应：hits/gaps 兜底为空数组，meta 补齐
+    expect(res.body.hits).toEqual([])
+    expect(res.body.gaps).toEqual([])
+    expect(res.body.meta.aiMode).toBe('hybrid')
+    expect(res.body.meta.timings).toHaveProperty('bff')
   })
 })
 
@@ -176,6 +233,7 @@ describe('POST /api/optimize-resume', () => {
       summary: '技术栈错位',
       suggestions: ['补充React经验'],
       missing_keywords: ['React'],
+      meta: { timings: { python: 20, llm: 700, total: 720 }, degraded: false, aiMode: 'hybrid' },
       message: '优化建议已生成',
     })
     const res = await request(app)
@@ -185,6 +243,13 @@ describe('POST /api/optimize-resume', () => {
     expect(res.body.summary).toBe('技术栈错位')
     expect(res.body.suggestions).toEqual(['补充React经验'])
     expect(res.body.missing_keywords).toEqual(['React'])
+
+    // 透传契约字段 + BFF 补齐 meta
+    expect(res.body.success).toBe(true)
+    expect(res.body.meta.degraded).toBe(false)
+    expect(res.body.meta.aiMode).toBe('hybrid')
+    expect(res.body.meta.timings).toHaveProperty('bff')
+    expect(res.body.meta.timings.total).toBeGreaterThanOrEqual(720)
   })
 
   it('下游失败返回 500', async () => {
@@ -193,6 +258,7 @@ describe('POST /api/optimize-resume', () => {
       .post('/api/optimize-resume')
       .send({ resume_text: '简历', job_description: '岗位' })
     expect(res.status).toBe(500)
+    expect(res.body.success).toBe(false)
     expect(res.body.message).toContain('LLM 调用失败')
   })
 })
@@ -220,6 +286,7 @@ describe('POST /api/radar', () => {
         { name: '表达能力', score: 70 },
         { name: '成长潜力', score: 75 },
       ],
+      meta: { timings: { python: 15, llm: 600, total: 615 }, degraded: false, aiMode: 'hybrid' },
       message: '雷达图数据已生成',
     })
     const res = await request(app).post('/api/radar').send({ resume: '简历', jd: '岗位' })
@@ -227,12 +294,20 @@ describe('POST /api/radar', () => {
     expect(res.body.dimensions).toHaveLength(5)
     expect(res.body.dimensions[1].score).toBe(100)
     expect(res.body.dimensions[2].score).toBe(0)
+
+    // 透传契约字段 + BFF 补齐 meta
+    expect(res.body.success).toBe(true)
+    expect(res.body.meta.degraded).toBe(false)
+    expect(res.body.meta.aiMode).toBe('hybrid')
+    expect(res.body.meta.timings).toHaveProperty('bff')
+    expect(res.body.meta.timings.total).toBeGreaterThanOrEqual(615)
   })
 
   it('下游失败返回 500 且 dimensions 为空', async () => {
     callJavaMock.mockRejectedValueOnce(new Error('java down'))
     const res = await request(app).post('/api/radar').send({ resume: '简历', jd: '岗位' })
     expect(res.status).toBe(500)
+    expect(res.body.success).toBe(false)
     expect(res.body.dimensions).toEqual([])
   })
 })
