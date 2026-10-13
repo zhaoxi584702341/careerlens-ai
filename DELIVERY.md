@@ -264,6 +264,31 @@ npm run dev
 **预期结果**：`Local: http://localhost:5173/`。
 **验证**：浏览器打开 5173，逐页操作四个功能页。
 
+### 4.3.1 启动顺序与启动前检查（实测）
+
+**严格顺序：Python(8000) → Java(8080) → BFF(3000) → 前端(5173)。** 后层依赖前层，关闭时反向。启动前先确认四端口空闲，避免与残留实例叠加（本项目约定「先关后开、禁止同端口多实例」）：
+
+```powershell
+Get-NetTCPConnection -State Listen -LocalPort 8000,8080,3000,5173 -ErrorAction SilentlyContinue
+# 无输出 = 四端口空闲，可继续；有输出则先停掉占用进程
+```
+
+### 4.3.2 启动常见异常与处理（实测踩坑记录）
+
+| 现象 | 根因 | 处理 |
+| --- | --- | --- |
+| BFF 启动报 `Error: Cannot find module '...\bff\node_modules\tsx\dist\cli.mjs'` | `bff/node_modules` 依赖不完整，`tsx` 未安装（`npm run dev` 用 `tsx watch` 运行 TS 入口） | 先 `cd bff; npm install`（或 `npm ci`），再 `npm run dev` |
+| Python 启动报 `No module named 'uvicorn'` / `No module named 'rules'` | 未用项目虚拟环境，或启动目录不是 `python-service` | 必须用 `.\.venv\Scripts\python.exe -m uvicorn main:app ...`，且 `cd python-service` 后执行 |
+| Python `pytest` 找不到 | 用了系统 Python 或 `venv`（非 `.venv`） | 统一用 `.venv\Scripts\python.exe -m pytest`（仅 `.venv` 装了 dev 依赖） |
+| Java 启动报 `Port 8080 was already in use` | 端口被残留实例占用 | 先释放对应端口再启动（禁止叠加实例） |
+| BFF `/api/history` 返回 `Cannot GET` | 跑的是旧 mock 入口，未指向 `app.ts` | 确认 `bff/src/index.ts` 已 `import { app } from './app.js'`，重启 BFF |
+| 前端页面能开但接口 404/500 | 后端链路未就绪（BFF/Java/Python 有未起者） | 按序自检 8000→8080→3000 健康检查 |
+| LLM 相关功能恒降级（`meta.aiMode=rule`） | `python-service/.env` 缺 LLM 三项配置 | 补齐 `LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL` 后重启 Python；仅离线演示可显式设 `AI_MODE=rule` |
+
+> **依赖安装须早于启动**：四个服务的依赖相互独立，但必须在启动对应服务前完成（Python `pip install -r requirements.txt`、Java `mvn dependency:resolve`、BFF/前端 `npm ci`）。本次实测即因 `bff` 依赖缺失导致首次 `npm run dev` 失败，补装后恢复。
+
+> **前端预览**：Vite 默认绑定 `localhost`，浏览器访问 `http://localhost:5173/`；若 5173 被占用，Vite 会自动改用 5174 等端口（以启动日志 `Local:` 为准）。
+
 ### 4.4 端到端全链路验证（BFF 层汇总）
 
 ```powershell
