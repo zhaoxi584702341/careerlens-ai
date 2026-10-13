@@ -289,6 +289,65 @@ Get-NetTCPConnection -State Listen -LocalPort 8000,8080,3000,5173 -ErrorAction S
 
 > **前端预览**：Vite 默认绑定 `localhost`，浏览器访问 `http://localhost:5173/`；若 5173 被占用，Vite 会自动改用 5174 等端口（以启动日志 `Local:` 为准）。
 
+### 4.3.3 项目关闭与资源释放（标准收尾环节）
+
+本节是**启动（4.3）的逆过程，也是每次演示、调试或交付后的标准收尾动作**，用于彻底释放端口与进程，避免残留实例影响下次启动。
+
+**执行时机**：演示结束 / 调试完成后 / 交付前 / 需要重启（改配置或依赖）时。**重启必须先完整关闭，再重新启动（先关后开，禁止同端口多实例）。**
+
+**前置条件**：无。可在任意时刻执行；若某服务已不在运行，关闭脚本会跳过并提示，不影响其余服务。
+
+#### 步骤 1：识别占用进程（可选，便于确认）
+
+```powershell
+Get-NetTCPConnection -State Listen -LocalPort 8000,8080,3000,5173 -ErrorAction SilentlyContinue |
+  Select-Object LocalPort,OwningProcess,@{n='Name';e={(Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName}} |
+  Sort-Object LocalPort | Format-Table -AutoSize
+# 期望：8000=python、8080=java、3000=node(bff)、5173=node(前端)
+```
+
+#### 步骤 2：按反向依赖顺序停止服务（前端 → BFF → Java → Python）
+
+> 顺序与启动相反（启动为 Python→Java→BFF→前端）。反向停止可避免上层向已停的下层持续发请求而产生报错日志。
+
+```powershell
+# 顺序：前端(5173) → BFF(3000) → Java(8080) → Python(8000)
+foreach ($p in 8464,19052,4168,28640) {
+  try { Stop-Process -Id $p -Force -ErrorAction Stop; "stopped PID $p" }
+  catch { "PID $p already gone" }
+}
+```
+
+> **PID 为动态值**：上面的 PID 是某次实测的快照，**每次启动都会变化**。正式执行时应以步骤 1 的输出为准，或改用「按端口取 PID 再停止」的通用写法：
+
+```powershell
+# 通用写法：按端口反序取 PID 并终止（前端→BFF→Java→Python）
+foreach ($port in 5173,3000,8080,8000) {
+  $conn = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue
+  if ($conn) {
+    $conn | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+      Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue
+      "port $port -> stopped PID $_"
+    }
+  } else { "port $port not listening" }
+}
+```
+
+> **替代方式**：在各服务的启动终端按 `Ctrl+C` 亦可优雅停止。`bff` 与前端由 `tsx watch` / `vite` 启动，`Ctrl+C` 会连同子进程一并退出。上述 `Stop-Process` 写法适用于**终端已关闭但进程仍在**的残留场景。
+
+#### 步骤 3：验证端口已释放
+
+```powershell
+Start-Sleep -Seconds 3
+$r = Get-NetTCPConnection -State Listen -LocalPort 8000,8080,3000,5173 -ErrorAction SilentlyContinue
+if ($r) { $r | Select-Object LocalPort,OwningProcess | Sort-Object LocalPort | Format-Table -AutoSize }
+else { "all ports free" }
+```
+
+**验证标准**：输出 `all ports free`（即四端口全部无监听），表示关闭完成、资源已释放。
+
+> **数据不丢失**：关闭服务**不影响** SQLite 持久化数据。历史记录保存在 `bff/data/careerlens.db`（Compose 场景为 `bff-data` 卷），下次启动后 `/api/history` 仍可查到。
+
 ### 4.4 端到端全链路验证（BFF 层汇总）
 
 ```powershell
