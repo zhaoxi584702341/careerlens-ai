@@ -3,8 +3,10 @@ import { computed, ref } from 'vue'
 import { optimizeResume, type OptimizeResumeResponse } from '@/api/resumeOptimize'
 import DegradedBanner from '@/components/DegradedBanner.vue'
 import { useResumeStore } from '@/stores/resume'
+import { useJobDescriptionStore } from '@/stores/jobDescription'
 
 const resumeStore = useResumeStore()
+const jobDescriptionStore = useJobDescriptionStore()
 
 /** 简历正文与全局 Store 双向绑定：无需重复上传，修改即全局同步 */
 const resumeText = computed({
@@ -12,7 +14,12 @@ const resumeText = computed({
   set: (val: string) => resumeStore.updateText(val),
 })
 
-const jobDescription = ref('')
+/** JD 与全局 Store 双向绑定：与其他模块共用同一份 JD，修改即全局同步 */
+const jobDescription = computed({
+  get: () => jobDescriptionStore.jdText,
+  set: (val: string) => jobDescriptionStore.updateText(val),
+})
+
 const loading = ref(false)
 const errorMessage = ref('')
 const result = ref<OptimizeResumeResponse | null>(null)

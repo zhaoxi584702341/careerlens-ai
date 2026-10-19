@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import UploadStatusBar from './UploadStatusBar.vue'
 import { useResumeStore } from '@/stores/resume'
+import { useJobDescriptionStore } from '@/stores/jobDescription'
 
 interface NavItem {
   label: string
@@ -42,16 +43,20 @@ const navItems: NavItem[] = [
 const route = useRoute()
 const router = useRouter()
 
-// 跨标签页同步简历数据：全局仅需注册一次，放在顶层布局中
+// 跨标签页同步简历与 JD 数据：全局仅需注册一次，放在顶层布局中
 const resumeStore = useResumeStore()
-let disposeSync: (() => void) | null = null
+const jobDescriptionStore = useJobDescriptionStore()
+let disposeResumeSync: (() => void) | null = null
+let disposeJdSync: (() => void) | null = null
 
 onMounted(() => {
-  disposeSync = resumeStore.initSync()
+  disposeResumeSync = resumeStore.initSync()
+  disposeJdSync = jobDescriptionStore.initSync()
 })
 
 onBeforeUnmount(() => {
-  disposeSync?.()
+  disposeResumeSync?.()
+  disposeJdSync?.()
 })
 
 function go(to: string) {

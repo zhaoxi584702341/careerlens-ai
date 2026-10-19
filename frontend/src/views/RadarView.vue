@@ -9,10 +9,12 @@ import { fetchRadar, type RadarDimension } from '@/api/radar'
 import type { Meta } from '@/api/resume'
 import DegradedBanner from '@/components/DegradedBanner.vue'
 import { useResumeStore } from '@/stores/resume'
+import { useJobDescriptionStore } from '@/stores/jobDescription'
 
 echarts.use([RadarChart, TooltipComponent, CanvasRenderer])
 
 const resumeStore = useResumeStore()
+const jobDescriptionStore = useJobDescriptionStore()
 
 /** 简历正文与全局 Store 双向绑定：无需重复上传，修改即全局同步 */
 const resumeText = computed({
@@ -20,7 +22,12 @@ const resumeText = computed({
   set: (val: string) => resumeStore.updateText(val),
 })
 
-const jdText = ref('')
+/** JD 与全局 Store 双向绑定：与其他模块共用同一份 JD，修改即全局同步 */
+const jdText = computed({
+  get: () => jobDescriptionStore.jdText,
+  set: (val: string) => jobDescriptionStore.updateText(val),
+})
+
 const loading = ref(false)
 const errorMessage = ref('')
 
