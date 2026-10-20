@@ -1,7 +1,11 @@
 package com.careerlens.dto;
 
+import jakarta.validation.constraints.NotBlank;
+
 public class RadarRequest {
+    @NotBlank(message = "resume 不能为空")
     private String resume;
+    @NotBlank(message = "jd 不能为空")
     private String jd;
 
     public RadarRequest() {}

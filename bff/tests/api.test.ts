@@ -31,7 +31,7 @@ process.env.DB_PATH = join(tmpDir, 'test.db')
 process.env.NODE_ENV = 'test'
 
 // 动态导入以确保 DB_PATH 在模块加载前生效
-const { app, callJavaHolder } = await import('../src/app.js')
+const { app, callJavaHolder, UpstreamError } = await import('../src/app.js')
 
 // 统一的转发 mock：默认返回空对象，各用例按需 mockResolvedValueOnce / mockRejectedValueOnce
 const callJavaMock = vi.fn()
@@ -79,12 +79,13 @@ describe('GET /api/history', () => {
 })
 
 describe('POST /api/analyze-resume', () => {
-  it('缺少 resume_text 返回参数错误', async () => {
+  it('缺少 resume_text 返回 400 统一错误信封', async () => {
     const res = await request(app).post('/api/analyze-resume').send({})
-    expect(res.status).toBe(200)
-    expect(res.body.keywords).toEqual([])
-    expect(res.body.score).toBe(0)
-    expect(res.body.message).toContain('resume_text')
+    expect(res.status).toBe(400)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.message).toContain('resume_text')
+    expect(res.body.requestId).toBeTruthy()
   })
 
   it('正常请求返回规范化结果并持久化', async () => {
@@ -124,14 +125,44 @@ describe('POST /api/analyze-resume', () => {
     expect(history.body.records[0].resume_text).toContain('Java')
   })
 
-  it('下游失败返回 500 与友好提示', async () => {
+  it('下游不可达返回 503 统一错误信封', async () => {
     callJavaMock.mockRejectedValueOnce(new Error('java down'))
     const res = await request(app)
       .post('/api/analyze-resume')
       .send({ resume_text: '简历文本' })
-    expect(res.status).toBe(500)
+    expect(res.status).toBe(503)
     expect(res.body.success).toBe(false)
-    expect(res.body.message).toContain('LLM 调用失败')
+    expect(res.body.error.code).toBe('SERVICE_UNAVAILABLE')
+    expect(res.body.requestId).toBeTruthy()
+  })
+
+  it('下游返回错误信封时原样透传状态与错误码', async () => {
+    callJavaMock.mockRejectedValueOnce(
+      new UpstreamError(502, {
+        requestId: 'up-1',
+        success: false,
+        error: { code: 'UPSTREAM_ERROR', message: 'Python 服务返回 500', degraded: false },
+      }),
+    )
+    const res = await request(app)
+      .post('/api/analyze-resume')
+      .send({ resume_text: '简历文本' })
+    expect(res.status).toBe(502)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('UPSTREAM_ERROR')
+    expect(res.body.error.message).toContain('Python 服务返回 500')
+  })
+
+  it('下游超时返回 504 UPSTREAM_TIMEOUT', async () => {
+    const abortError = new Error('aborted')
+    abortError.name = 'AbortError'
+    callJavaMock.mockRejectedValueOnce(abortError)
+    const res = await request(app)
+      .post('/api/analyze-resume')
+      .send({ resume_text: '简历文本' })
+    expect(res.status).toBe(504)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('UPSTREAM_TIMEOUT')
   })
 
   it('score 越界被裁剪到 0-100', async () => {
@@ -144,17 +175,20 @@ describe('POST /api/analyze-resume', () => {
 })
 
 describe('POST /api/match-job', () => {
-  it('缺少 resume_text 返回参数错误', async () => {
+  it('缺少 resume_text 返回 400 统一错误信封', async () => {
     const res = await request(app).post('/api/match-job').send({ job_description: '岗位' })
-    expect(res.status).toBe(200)
-    expect(res.body.match_score).toBe(0)
-    expect(res.body.message).toContain('resume_text')
+    expect(res.status).toBe(400)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.message).toContain('resume_text')
   })
 
-  it('缺少 job_description 返回参数错误', async () => {
+  it('缺少 job_description 返回 400 统一错误信封', async () => {
     const res = await request(app).post('/api/match-job').send({ resume_text: '简历' })
-    expect(res.status).toBe(200)
-    expect(res.body.message).toContain('job_description')
+    expect(res.status).toBe(400)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.message).toContain('job_description')
   })
 
   it('正常请求返回完整匹配结构', async () => {
@@ -195,15 +229,15 @@ describe('POST /api/match-job', () => {
     expect(res.body.meta.timings.total).toBeGreaterThanOrEqual(940)
   })
 
-  it('下游失败时缺失字段为空数组（结构稳定）', async () => {
+  it('下游不可达返回 503 统一错误信封（结构稳定）', async () => {
     callJavaMock.mockRejectedValueOnce(new Error('java down'))
     const res = await request(app)
       .post('/api/match-job')
       .send({ resume_text: '简历', job_description: '岗位' })
-    expect(res.status).toBe(500)
+    expect(res.status).toBe(503)
     expect(res.body.success).toBe(false)
-    expect(res.body.advantages).toEqual([])
-    expect(res.body.improvements).toEqual([])
+    expect(res.body.error.code).toBe('SERVICE_UNAVAILABLE')
+    expect(res.body.requestId).toBeTruthy()
   })
 
   it('下游未返回 meta 时降级为 rule 模式', async () => {
@@ -221,11 +255,12 @@ describe('POST /api/match-job', () => {
 })
 
 describe('POST /api/optimize-resume', () => {
-  it('缺少 resume_text 返回参数错误', async () => {
+  it('缺少 resume_text 返回 400 统一错误信封', async () => {
     const res = await request(app).post('/api/optimize-resume').send({ job_description: '岗位' })
-    expect(res.status).toBe(200)
-    expect(res.body.summary).toBe('')
-    expect(res.body.message).toContain('resume_text')
+    expect(res.status).toBe(400)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.message).toContain('resume_text')
   })
 
   it('正常请求返回评价/建议/缺失关键词', async () => {
@@ -252,29 +287,32 @@ describe('POST /api/optimize-resume', () => {
     expect(res.body.meta.timings.total).toBeGreaterThanOrEqual(720)
   })
 
-  it('下游失败返回 500', async () => {
+  it('下游不可达返回 503 统一错误信封', async () => {
     callJavaMock.mockRejectedValueOnce(new Error('java down'))
     const res = await request(app)
       .post('/api/optimize-resume')
       .send({ resume_text: '简历', job_description: '岗位' })
-    expect(res.status).toBe(500)
+    expect(res.status).toBe(503)
     expect(res.body.success).toBe(false)
-    expect(res.body.message).toContain('LLM 调用失败')
+    expect(res.body.error.code).toBe('SERVICE_UNAVAILABLE')
   })
 })
 
 describe('POST /api/radar', () => {
-  it('缺少 resume 返回参数错误（注意：radar 使用 resume/jd 契约）', async () => {
+  it('缺少 resume 返回 400 统一错误信封（注意：radar 使用 resume/jd 契约）', async () => {
     const res = await request(app).post('/api/radar').send({ jd: '岗位' })
-    expect(res.status).toBe(200)
-    expect(res.body.dimensions).toEqual([])
-    expect(res.body.message).toContain('resume')
+    expect(res.status).toBe(400)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.message).toContain('resume')
   })
 
-  it('缺少 jd 返回参数错误', async () => {
+  it('缺少 jd 返回 400 统一错误信封', async () => {
     const res = await request(app).post('/api/radar').send({ resume: '简历' })
-    expect(res.status).toBe(200)
-    expect(res.body.message).toContain('jd')
+    expect(res.status).toBe(400)
+    expect(res.body.success).toBe(false)
+    expect(res.body.error.code).toBe('VALIDATION_ERROR')
+    expect(res.body.error.message).toContain('jd')
   })
 
   it('正常请求返回五维度并裁剪越界分数', async () => {
@@ -303,11 +341,11 @@ describe('POST /api/radar', () => {
     expect(res.body.meta.timings.total).toBeGreaterThanOrEqual(615)
   })
 
-  it('下游失败返回 500 且 dimensions 为空', async () => {
+  it('下游不可达返回 503 统一错误信封', async () => {
     callJavaMock.mockRejectedValueOnce(new Error('java down'))
     const res = await request(app).post('/api/radar').send({ resume: '简历', jd: '岗位' })
-    expect(res.status).toBe(500)
+    expect(res.status).toBe(503)
     expect(res.body.success).toBe(false)
-    expect(res.body.dimensions).toEqual([])
+    expect(res.body.error.code).toBe('SERVICE_UNAVAILABLE')
   })
 })

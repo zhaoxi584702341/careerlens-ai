@@ -1,6 +1,7 @@
 package com.careerlens.controller;
 
 import com.careerlens.config.PythonServiceConfig;
+import com.careerlens.exception.GlobalExceptionHandler;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -28,7 +29,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * 端的 snake_case 字段并转发。因此本测试聚焦两点：
  * <ol>
  *   <li>字段映射与转发路径正确（BFF 驼峰字段 → Python 下划线字段）；</li>
- *   <li>成功时透传下游响应，异常时统一返回 500 与友好提示。</li>
+ *   <li>成功时透传下游响应，异常时由 GlobalExceptionHandler 按 contracts/error-envelope.schema.json 映射错误信封。</li>
  * </ol>
  * Java 服务测试无需依赖真实 Python 服务。</p>
  *
@@ -58,7 +59,10 @@ class CareerControllerTest {
         ReflectionTestUtils.setField(controller, "restTemplate", restTemplate);
         ReflectionTestUtils.setField(controller, "pythonServiceConfig", config);
 
-        mockMvc = MockMvcBuilders.standaloneSetup(controller).build();
+        // 注册全局异常处理器，使抛出的下游异常按 contracts/error-envelope.schema.json 映射为错误信封
+        mockMvc = MockMvcBuilders.standaloneSetup(controller)
+                .setControllerAdvice(new GlobalExceptionHandler())
+                .build();
     }
 
     // ==================== GET /api/health ====================
@@ -97,16 +101,19 @@ class CareerControllerTest {
     }
 
     @Test
-    @DisplayName("analyze 异常：下游返回 5xx 时透出 500 与友好提示")
-    void analyze_downstreamFailure_returns500() throws Exception {
+    @DisplayName("analyze 异常：下游 5xx 映射为 502 错误信封 UPSTREAM_ERROR")
+    void analyze_downstreamFailure_returnsEnvelope() throws Exception {
         server.expect(requestTo(PYTHON_URL + "/api/analyze"))
                 .andRespond(withServerError());
 
         mockMvc.perform(post("/api/analyze")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"resumeText\":\"简历\"}"))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.error").exists());
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.requestId").exists())
+                .andExpect(jsonPath("$.error.code").value("UPSTREAM_ERROR"))
+                .andExpect(jsonPath("$.error.degraded").value(false));
 
         server.verify();
     }
@@ -137,15 +144,17 @@ class CareerControllerTest {
     }
 
     @Test
-    @DisplayName("match 异常：下游失败返回 500")
-    void match_downstreamFailure_returns500() throws Exception {
+    @DisplayName("match 异常：下游 5xx 映射为 502 错误信封")
+    void match_downstreamFailure_returnsEnvelope() throws Exception {
         server.expect(requestTo(PYTHON_URL + "/api/match"))
                 .andRespond(withServerError());
 
         mockMvc.perform(post("/api/match")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"resumeText\":\"简历\",\"jobDescription\":\"岗位\"}"))
-                .andExpect(status().isInternalServerError());
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("UPSTREAM_ERROR"));
 
         server.verify();
     }
@@ -172,15 +181,17 @@ class CareerControllerTest {
     }
 
     @Test
-    @DisplayName("optimize 异常：下游失败返回 500")
-    void optimize_downstreamFailure_returns500() throws Exception {
+    @DisplayName("optimize 异常：下游 5xx 映射为 502 错误信封")
+    void optimize_downstreamFailure_returnsEnvelope() throws Exception {
         server.expect(requestTo(PYTHON_URL + "/api/optimize"))
                 .andRespond(withServerError());
 
         mockMvc.perform(post("/api/optimize")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"resumeText\":\"简历\",\"jobDescription\":\"岗位\"}"))
-                .andExpect(status().isInternalServerError());
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("UPSTREAM_ERROR"));
 
         server.verify();
     }
@@ -212,16 +223,17 @@ class CareerControllerTest {
     }
 
     @Test
-    @DisplayName("radar 异常：下游失败返回 500 且包含 error 字段")
-    void radar_downstreamFailure_returns500() throws Exception {
+    @DisplayName("radar 异常：下游 5xx 映射为 502 错误信封")
+    void radar_downstreamFailure_returnsEnvelope() throws Exception {
         server.expect(requestTo(PYTHON_URL + "/api/radar"))
                 .andRespond(withServerError());
 
         mockMvc.perform(post("/api/radar")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"resume\":\"简历\",\"jd\":\"岗位\"}"))
-                .andExpect(status().isInternalServerError())
-                .andExpect(jsonPath("$.error").exists());
+                .andExpect(status().isBadGateway())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("UPSTREAM_ERROR"));
 
         server.verify();
     }
@@ -229,16 +241,14 @@ class CareerControllerTest {
     // ==================== 边界场景 ====================
 
     @Test
-    @DisplayName("analyze 边界：请求体为空对象时字段为 null，转发不应崩溃")
-    void analyze_emptyBody_doesNotCrash() throws Exception {
-        server.expect(requestTo(PYTHON_URL + "/api/analyze"))
-                .andRespond(withSuccess("{\"keywords\":[],\"score\":0}", MediaType.APPLICATION_JSON));
-
+    @DisplayName("analyze 边界：空对象触发 JSR-380 校验，返回 400 校验错误信封")
+    void analyze_emptyBody_returnsValidationError() throws Exception {
+        // @Valid + @NotBlank 生效后，空 resumeText 由 Java 层直接拒绝，不再转发到 Python
         mockMvc.perform(post("/api/analyze")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
-                .andExpect(status().isOk());
-
-        server.verify();
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"));
     }
 }

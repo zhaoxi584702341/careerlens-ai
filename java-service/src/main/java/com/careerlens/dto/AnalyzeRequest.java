@@ -1,6 +1,9 @@
 package com.careerlens.dto;
 
+import jakarta.validation.constraints.NotBlank;
+
 public class AnalyzeRequest {
+    @NotBlank(message = "resumeText 不能为空")
     private String resumeText;
 
     public AnalyzeRequest() {}

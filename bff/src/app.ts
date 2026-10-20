@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express'
+import { randomUUID } from 'node:crypto'
 // ===== 引入 dotenv（仅用于配置 Java 服务地址等少量环境变量，BFF 不再直接调 LLM） =====
 import 'dotenv/config'
 // ===== 引入 SQLite 持久化方法 =====
@@ -52,9 +53,105 @@ function withBffMeta<T extends Record<string, unknown>>(data: T, bffMs: number, 
 }
 
 /**
+ * 参数校验失败：返回契约统一错误信封（见 contracts/error-envelope.schema.json）。
+ * 契约要求 requestId + success:false + error{code,message,degraded}，HTTP 400，
+ * 与 Java 层 GlobalExceptionHandler 的 VALIDATION_ERROR 语义保持一致。
+ */
+function sendValidationError(req: Request, res: Response, message: string): void {
+  const requestId = req.header('X-Request-Id') ?? randomUUID()
+  res.setHeader('X-Request-Id', requestId)
+  res.status(400).json({
+    requestId,
+    success: false,
+    error: { code: 'VALIDATION_ERROR', message, degraded: false },
+  })
+}
+
+/**
+ * 校验必填文本字段：缺失或非字符串时返回 400 错误信封并结束响应。
+ * 返回 true 表示校验通过。四接口共用，避免校验逻辑重复。
+ */
+function requireText(req: Request, res: Response, value: unknown, fieldName: string): value is string {
+  if (!value || typeof value !== 'string') {
+    sendValidationError(req, res, `请求参数错误：${fieldName} 不能为空`)
+    return false
+  }
+  return true
+}
+
+/** 契约错误信封（见 contracts/error-envelope.schema.json） */
+type ErrorEnvelope = {
+  requestId?: string
+  success?: boolean
+  error?: { code?: string; message?: string; degraded?: boolean }
+}
+
+/**
+ * 下游调用错误：携带 Java 返回的 HTTP 状态与错误信封，便于网关层原样透传。
+ * 与普通 Error 区分，用于判定「下游已给出结构化错误」还是「连接失败/超时」。
+ */
+export class UpstreamError extends Error {
+  readonly status: number
+  readonly envelope: ErrorEnvelope | null
+
+  constructor(status: number, envelope: ErrorEnvelope | null) {
+    super(`下游服务返回 HTTP ${status}`)
+    this.name = 'UpstreamError'
+    this.status = status
+    this.envelope = envelope
+  }
+}
+
+/** 尝试把下游响应体解析为错误信封；结构不符时返回 null。 */
+function parseErrorEnvelope(text: string): ErrorEnvelope | null {
+  try {
+    const parsed = JSON.parse(text) as ErrorEnvelope
+    return parsed && typeof parsed === 'object' && parsed.error ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 下游失败：按 contracts/error-codes.md 返回统一错误信封（HTTP 400/502/503/504）。
+ * - Java 已返回错误信封 → 透传其状态与 error.code（UPSTREAM_ERROR / UPSTREAM_TIMEOUT / SERVICE_UNAVAILABLE）
+ * - 超时（AbortError）→ 504 UPSTREAM_TIMEOUT
+ * - 连接失败等未归类异常 → 503 SERVICE_UNAVAILABLE
+ */
+function sendUpstreamError(req: Request, res: Response, error: unknown): void {
+  const requestId = req.header('X-Request-Id') ?? randomUUID()
+  res.setHeader('X-Request-Id', requestId)
+
+  if (error instanceof UpstreamError && error.envelope?.error) {
+    res.status(error.status).json({
+      requestId,
+      success: false,
+      error: {
+        code: error.envelope.error.code ?? 'UPSTREAM_ERROR',
+        message: error.envelope.error.message ?? '下游服务调用失败',
+        degraded: error.envelope.error.degraded ?? false,
+      },
+    })
+    return
+  }
+
+  const timedOut = error instanceof Error && error.name === 'AbortError'
+  res.status(timedOut ? 504 : 503).json({
+    requestId,
+    success: false,
+    error: {
+      code: timedOut ? 'UPSTREAM_TIMEOUT' : 'SERVICE_UNAVAILABLE',
+      message: timedOut ? '下游服务响应超时，请稍后重试' : LLM_ERROR_MESSAGE,
+      degraded: false,
+    },
+  })
+}
+
+/**
  * 转发请求到 Java 服务（Java 内部再转发到 Python，最终调用 LLM）。
  * 统一处理超时、网络异常与非 2xx 响应，成功时返回解析后的 JSON 数据。
- * 失败时抛出错误，由各接口的 catch 统一转换为 500 友好提示。
+ * 失败时抛出 UpstreamError（非 2xx）或原始异常（连接失败/超时），
+ * 由各接口的 catch 经 sendUpstreamError 统一转换为契约错误信封。
  *
  * 说明：本函数通过对象属性导出（callJavaImpl），便于测试中以 vi.spyOn 替换，
  * 从而在不依赖真实下游服务的情况下验证 BFF 自身逻辑。
@@ -73,7 +170,7 @@ export async function callJavaImpl<T>(path: string, body: unknown): Promise<T> {
 
     const text = await response.text()
     if (!response.ok) {
-      throw new Error(`Java 服务返回 ${response.status}: ${text}`)
+      throw new UpstreamError(response.status, parseErrorEnvelope(text))
     }
     return text ? (JSON.parse(text) as T) : ({} as T)
   } finally {
@@ -96,16 +193,10 @@ const callJava = <T>(path: string, body: unknown): Promise<T> => callJavaHolder.
 app.post('/api/analyze-resume', async (req: Request, res: Response) => {
   const { resume_text } = req.body ?? {}
 
-  if (!resume_text || typeof resume_text !== 'string') {
-    res.json({ keywords: [], score: 0, message: '请求参数错误：resume_text 不能为空' })
-    return
-  }
+  if (!requireText(req, res, resume_text, 'resume_text')) return
 
   try {
-    // 1. 先将用户输入的原始简历文本写入数据库
-    const resumeId = saveResume(resume_text)
-
-    // 2. 调用 Java 服务获取分析结果（Java 内部转发到 Python）
+    // 1. 调用 Java 服务获取分析结果（Java 内部转发到 Python）
     //    Java DTO 使用驼峰字段 resumeText
     const javaStarted = Date.now()
     const data = await callJava<{
@@ -141,14 +232,15 @@ app.post('/api/analyze-resume', async (req: Request, res: Response) => {
       false,
     )
 
-    // 4. 将结构化结果写入数据库，关联已生成的简历 ID
+    // 4. 调用成功后再落库，避免下游失败时留下孤儿简历记录
+    const resumeId = saveResume(resume_text)
     saveAnalysis(resumeId, JSON.stringify(result))
 
     // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[analyze-resume] Java 服务调用失败:', error)
-    res.status(500).json({ success: false, keywords: [], score: 0, message: LLM_ERROR_MESSAGE })
+    sendUpstreamError(req, res, error)
   }
 })
 
@@ -156,21 +248,11 @@ app.post('/api/analyze-resume', async (req: Request, res: Response) => {
 app.post('/api/match-job', async (req: Request, res: Response) => {
   const { resume_text, job_description } = req.body ?? {}
 
-  if (!resume_text || typeof resume_text !== 'string') {
-    res.json({ match_score: 0, advantages: [], improvements: [], message: '请求参数错误：resume_text 不能为空' })
-    return
-  }
-  if (!job_description || typeof job_description !== 'string') {
-    res.json({ match_score: 0, advantages: [], improvements: [], message: '请求参数错误：job_description 不能为空' })
-    return
-  }
+  if (!requireText(req, res, resume_text, 'resume_text')) return
+  if (!requireText(req, res, job_description, 'job_description')) return
 
   try {
-    // 1. 先将用户输入的原始简历与岗位描述写入数据库
-    const resumeId = saveResume(resume_text)
-    const jobId = saveJob(job_description)
-
-    // 2. 调用 Java 服务获取匹配结果（Java 内部转发到 Python）
+    // 1. 调用 Java 服务获取匹配结果（Java 内部转发到 Python）
     //    Java DTO 使用驼峰字段 resumeText / jobDescription
     const javaStarted = Date.now()
     const data = await callJava<{
@@ -209,20 +291,16 @@ app.post('/api/match-job', async (req: Request, res: Response) => {
       false,
     )
 
-    // 4. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
+    // 4. 调用成功后再落库，避免下游失败时留下孤儿记录
+    const resumeId = saveResume(resume_text)
+    const jobId = saveJob(job_description)
     saveMatch(resumeId, jobId, JSON.stringify(result))
 
     // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[match-job] Java 服务调用失败:', error)
-    res.status(500).json({
-      success: false,
-      match_score: 0,
-      advantages: [],
-      improvements: [],
-      message: LLM_ERROR_MESSAGE,
-    })
+    sendUpstreamError(req, res, error)
   }
 })
 
@@ -230,21 +308,11 @@ app.post('/api/match-job', async (req: Request, res: Response) => {
 app.post('/api/optimize-resume', async (req: Request, res: Response) => {
   const { resume_text, job_description } = req.body ?? {}
 
-  if (!resume_text || typeof resume_text !== 'string') {
-    res.json({ summary: '', suggestions: [], missing_keywords: [], message: '请求参数错误：resume_text 不能为空' })
-    return
-  }
-  if (!job_description || typeof job_description !== 'string') {
-    res.json({ summary: '', suggestions: [], missing_keywords: [], message: '请求参数错误：job_description 不能为空' })
-    return
-  }
+  if (!requireText(req, res, resume_text, 'resume_text')) return
+  if (!requireText(req, res, job_description, 'job_description')) return
 
   try {
-    // 1. 先将用户输入的原始简历与岗位描述写入数据库
-    const resumeId = saveResume(resume_text)
-    const jobId = saveJob(job_description)
-
-    // 2. 调用 Java 服务获取优化建议（Java 内部转发到 Python）
+    // 1. 调用 Java 服务获取优化建议（Java 内部转发到 Python）
     //    Java DTO 使用驼峰字段 resumeText / jobDescription
     const javaStarted = Date.now()
     const data = await callJava<{
@@ -271,20 +339,16 @@ app.post('/api/optimize-resume', async (req: Request, res: Response) => {
       false,
     )
 
-    // 4. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
+    // 4. 调用成功后再落库，避免下游失败时留下孤儿记录
+    const resumeId = saveResume(resume_text)
+    const jobId = saveJob(job_description)
     saveOptimization(resumeId, jobId, JSON.stringify(result))
 
     // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[optimize-resume] Java 服务调用失败:', error)
-    res.status(500).json({
-      success: false,
-      summary: '',
-      suggestions: [],
-      missing_keywords: [],
-      message: LLM_ERROR_MESSAGE,
-    })
+    sendUpstreamError(req, res, error)
   }
 })
 
@@ -292,21 +356,11 @@ app.post('/api/optimize-resume', async (req: Request, res: Response) => {
 app.post('/api/radar', async (req: Request, res: Response) => {
   const { resume, jd } = req.body ?? {}
 
-  if (!resume || typeof resume !== 'string') {
-    res.json({ dimensions: [], message: '请求参数错误：resume 不能为空' })
-    return
-  }
-  if (!jd || typeof jd !== 'string') {
-    res.json({ dimensions: [], message: '请求参数错误：jd 不能为空' })
-    return
-  }
+  if (!requireText(req, res, resume, 'resume')) return
+  if (!requireText(req, res, jd, 'jd')) return
 
   try {
-    // 1. 先将用户输入的原始简历与岗位描述写入数据库
-    const resumeId = saveResume(resume)
-    const jobId = saveJob(jd)
-
-    // 2. 调用 Java 服务获取雷达评估结果（Java 内部转发到 Python）
+    // 1. 调用 Java 服务获取雷达评估结果（Java 内部转发到 Python）
     //    Java 端 radar DTO 使用 resume / jd 字段（与 Python 一致）
     const javaStarted = Date.now()
     const data = await callJava<{
@@ -335,18 +389,16 @@ app.post('/api/radar', async (req: Request, res: Response) => {
       false,
     )
 
-    // 4. 将结构化结果写入数据库，关联已生成的简历 ID 与岗位 ID
+    // 4. 调用成功后再落库，避免下游失败时留下孤儿记录
+    const resumeId = saveResume(resume)
+    const jobId = saveJob(jd)
     saveRadar(resumeId, jobId, JSON.stringify(result))
 
     // 5. 返回给前端
     res.json(result)
   } catch (error) {
     console.error('[radar] Java 服务调用失败:', error)
-    res.status(500).json({
-      success: false,
-      dimensions: [],
-      message: LLM_ERROR_MESSAGE,
-    })
+    sendUpstreamError(req, res, error)
   }
 })
 
@@ -355,7 +407,8 @@ app.post('/api/radar', async (req: Request, res: Response) => {
 app.get('/api/history', (req: Request, res: Response) => {
   // 解析并校验 limit 参数，非法或缺失时使用默认值 20
   const rawLimit = Number(req.query.limit)
-  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 20
+  // 上限 100，避免超大 limit 造成不必要的查询压力
+  const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(100, Math.floor(rawLimit)) : 20
 
   try {
     const records = getRecentRecords(limit)

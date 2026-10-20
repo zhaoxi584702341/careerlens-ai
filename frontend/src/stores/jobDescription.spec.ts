@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { computed } from 'vue'
 import { setActivePinia, createPinia } from 'pinia'
 import { useJobDescriptionStore } from './jobDescription'
@@ -8,6 +8,12 @@ describe('useJobDescriptionStore', () => {
   beforeEach(() => {
     localStorage.clear()
     setActivePinia(createPinia())
+    // 仅伪造定时器（保留真实 Date），以便确定性验证防抖落盘时机
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('初始状态为空：hasJD=false、charCount=0、updatedAt=null', () => {
@@ -31,6 +37,9 @@ describe('useJobDescriptionStore', () => {
   it('jdText 持久化到 localStorage（含更新时间）', () => {
     const store = useJobDescriptionStore()
     store.updateText('持久化JD内容')
+    // 防抖窗口内尚未落盘
+    expect(localStorage.getItem('careerlens.jd.v1')).toBeNull()
+    vi.advanceTimersByTime(300)
 
     const raw = localStorage.getItem('careerlens.jd.v1')
     expect(raw).toBeTruthy()
@@ -126,11 +135,52 @@ describe('useJobDescriptionStore', () => {
 
     resumeStore.setResume('张三 前端工程师', { name: 'resume.pdf', kind: 'pdf', updatedAt: 1 })
     jdStore.updateText('岗位：高级前端')
+    // JD 走防抖落盘，待窗口到期后再校验持久化结果
+    vi.advanceTimersByTime(300)
 
     // 两个 Store 各自独立持久化，互不覆盖
     expect(resumeStore.resumeText).toBe('张三 前端工程师')
     expect(resumeStore.hasResume).toBe(true)
     expect(JSON.parse(localStorage.getItem('careerlens.resume.v1') as string).text).toBe('张三 前端工程师')
     expect(JSON.parse(localStorage.getItem('careerlens.jd.v1') as string).text).toBe('岗位：高级前端')
+  })
+
+  it('updateText 防抖落盘：窗口内不写，到期后写入 localStorage', () => {
+    const store = useJobDescriptionStore()
+    store.updateText('防抖JD')
+    expect(localStorage.getItem('careerlens.jd.v1')).toBeNull()
+
+    vi.advanceTimersByTime(300)
+    const parsed = JSON.parse(localStorage.getItem('careerlens.jd.v1') as string)
+    expect(parsed.text).toBe('防抖JD')
+  })
+
+  it('页面隐藏时立即补写未落盘编辑（防抖窗口内切标签页不丢数据）', () => {
+    const store = useJobDescriptionStore()
+    const dispose = store.initSync()
+    store.updateText('未落盘JD')
+    expect(localStorage.getItem('careerlens.jd.v1')).toBeNull()
+
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' })
+    document.dispatchEvent(new Event('visibilitychange'))
+    const parsed = JSON.parse(localStorage.getItem('careerlens.jd.v1') as string)
+    expect(parsed.text).toBe('未落盘JD')
+
+    // 还原可见性并清理监听，避免污染其他用例
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' })
+    dispose()
+  })
+
+  it('beforeunload 时立即补写未落盘编辑（防抖窗口内刷新/关闭不丢数据）', () => {
+    const store = useJobDescriptionStore()
+    const dispose = store.initSync()
+    store.updateText('刷新前未落盘')
+    expect(localStorage.getItem('careerlens.jd.v1')).toBeNull()
+
+    window.dispatchEvent(new Event('beforeunload'))
+    const parsed = JSON.parse(localStorage.getItem('careerlens.jd.v1') as string)
+    expect(parsed.text).toBe('刷新前未落盘')
+
+    dispose()
   })
 })

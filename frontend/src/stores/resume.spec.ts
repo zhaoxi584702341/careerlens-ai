@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useResumeStore } from './resume'
 
@@ -6,6 +6,12 @@ describe('useResumeStore', () => {
   beforeEach(() => {
     localStorage.clear()
     setActivePinia(createPinia())
+    // 仅伪造定时器（保留真实 Date），以便确定性验证防抖落盘时机
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('初始状态为空：hasResume=false、charCount=0', () => {
@@ -97,5 +103,36 @@ describe('useResumeStore', () => {
     expect(store.resumeText).toBe('来自其他标签页')
     // applyExternal 不触发 persist：storage 中的哨兵值应保持不变
     expect(localStorage.getItem('careerlens.resume.v1')).toBe('sentinel')
+  })
+
+  it('setResume（文件导入）立即落盘，不等待防抖窗口', () => {
+    const store = useResumeStore()
+    store.setResume('导入的简历', { name: 'r.pdf', kind: 'pdf', updatedAt: 1 })
+
+    const parsed = JSON.parse(localStorage.getItem('careerlens.resume.v1') as string)
+    expect(parsed.text).toBe('导入的简历')
+  })
+
+  it('updateText 防抖落盘：窗口内不写，到期后写入 localStorage', () => {
+    const store = useResumeStore()
+    store.updateText('防抖简历')
+    expect(localStorage.getItem('careerlens.resume.v1')).toBeNull()
+
+    vi.advanceTimersByTime(300)
+    const parsed = JSON.parse(localStorage.getItem('careerlens.resume.v1') as string)
+    expect(parsed.text).toBe('防抖简历')
+  })
+
+  it('beforeunload 时立即补写未落盘的编辑（防抖窗口内刷新/关闭不丢数据）', () => {
+    const store = useResumeStore()
+    const dispose = store.initSync()
+    store.updateText('未落盘简历')
+    expect(localStorage.getItem('careerlens.resume.v1')).toBeNull()
+
+    window.dispatchEvent(new Event('beforeunload'))
+    const parsed = JSON.parse(localStorage.getItem('careerlens.resume.v1') as string)
+    expect(parsed.text).toBe('未落盘简历')
+
+    dispose()
   })
 })

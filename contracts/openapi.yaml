@@ -452,11 +452,15 @@ components:
       properties:
         timings:
           type: object
+          description: >-
+            各层耗时（毫秒）。各字段为对应层的自测耗时，存在嵌套包含关系
+            （python/llm 位于 java 之内，java 位于 bff 之内），因此各段之和不等于
+            total；定位慢点时应比较相邻两层的差值。
           properties:
-            bff: { type: integer }
-            java: { type: integer }
-            python: { type: integer }
-            llm: { type: integer }
-            total: { type: integer }
+            bff: { type: integer, description: BFF 等待 Java 响应的耗时 }
+            java: { type: integer, description: Java 层端到端耗时（含等待 Python），由 Java 层补齐 }
+            python: { type: integer, description: Python 规则处理耗时（不含 LLM 调用） }
+            llm: { type: integer, description: LLM 调用耗时；降级为规则模式时接近 0 }
+            total: { type: integer, description: 端到端汇总耗时，由 BFF 计算 }
         degraded: { type: boolean }
         aiMode: { type: string, enum: [llm, hybrid, rule] }

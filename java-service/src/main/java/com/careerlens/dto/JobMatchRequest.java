@@ -1,7 +1,11 @@
 package com.careerlens.dto;
 
+import jakarta.validation.constraints.NotBlank;
+
 public class JobMatchRequest {
+    @NotBlank(message = "resumeText 不能为空")
     private String resumeText;
+    @NotBlank(message = "jobDescription 不能为空")
     private String jobDescription;
 
     public JobMatchRequest() {}
